@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "node_id": 10,
+  "bitrate_kbps": 125,
+  "identity": {
+    "vendor_id": 1,
+    "product_code": 1,
+    "revision_number": 1,
+    "serial_number": 1001
+  },
+  "heartbeat_ms": 1000,
+  "worker_period_us": 1000,
+  "objects": [
+    {"index": "0x2000", "type": "UNSIGNED16", "value": 0, "access": "ro", "pdo": "tx", "local_write": true},
+    {"index": "0x2001", "type": "INTEGER32", "value": 0, "access": "rw", "pdo": "rx", "local_write": true},
+    {"index": "0x2002", "type": "REAL32", "value": 1.5, "local_write": true},
+    {"index": "0x2003", "type": "VISIBLE_STRING", "size": 32, "value": "XNET CANopen simulator", "local_write": true},
+    {"index": "0x2004", "kind": "array", "type": "UNSIGNED16", "values": [1, 2, 3], "local_write": true},
+    {
+      "index": "0x2005",
+      "kind": "record",
+      "members": [
+        {"subindex": 0, "type": "UNSIGNED8", "value": 2, "access": "ro"},
+        {"subindex": 1, "type": "UNSIGNED32", "value": 42, "local_write": true},
+        {"subindex": 2, "type": "VISIBLE_STRING", "size": 16, "value": "record"}
+      ]
+    }
+  ],
+  "rpdos": [
+    {"transmission_type": 255, "mapping": [{"index": "0x2001", "subindex": 0}]}
+  ],
+  "tpdos": [
+    {"transmission_type": 255, "event_ms": 0, "inhibit_100us": 10, "mapping": [{"index": "0x2000", "subindex": 0}]}
+  ]
+}

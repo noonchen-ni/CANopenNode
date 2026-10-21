@@ -183,44 +183,57 @@ Heartbeat consumer and node guarding are not enabled.
 
 ## Batch ABI
 
-The binding descriptor has size 12 bytes, with fields at offsets:
-`index:0`, `subindex:2`, `reserved:3`, `offset:4`, `size:8`.
-Use the platform's normal C ABI, not packed clusters with a different stride.
+Binding uses three numeric arrays: uint16 indices, uint8 subindices, and uint32
+sizes. Each has `count` elements. In LabVIEW configure these as numeric arrays
+passed by **Array Data Pointer**, not array handles or arrays of clusters.
+Validate array lengths before calling: C receives pointers, not array dimensions.
 The status descriptor has eight uint32 fields (32 bytes).
 
-`bind_batch()` validates exact OD lengths, distinct OD addresses, non-overlapping
-buffer ranges, reserved=0, <=4096 bindings, and a buffer span <=1 MiB.
+`bind_batch()` copies the arrays and validates exact OD lengths, distinct OD
+addresses, <=4096 bindings, and a total size <=1 MiB. Values occupy consecutive
+byte slots in array order, with no padding: offset[i] is the sum of sizes before
+i. Offsets are calculated internally, not supplied by the caller.
 Configure groups before starting for lowest runtime latency.
 
 ```c
-xnet_canopen_binding_t bindings[] = {
-    {0x2000, 0, 0, 0, 2},
-    {0x2001, 0, 0, 2, 4}
-};
+uint16_t indices[] = {0x2000, 0x2001};
+uint8_t subindices[] = {0, 0};
+uint32_t sizes[] = {2, 4};
 uint32_t batch;
-int32_t result = xnet_canopen_bind_batch(handle, bindings, 2, &batch);
+int32_t result = xnet_canopen_bind_batch(
+    handle, indices, subindices, sizes, 2, &batch);
 /* Check result before using batch. */
 uint8_t buffer[6] = {0x34, 0x12, 0, 0, 0, 0};
-uint8_t enable[2] = {1, 0};
 int32_t entry_status[2];
 result = xnet_canopen_write_batch(
-    handle, batch, buffer, sizeof(buffer), enable, entry_status, 2);
+    handle, batch, buffer, sizeof(buffer), entry_status, 2);
 ```
 
 All numeric values use little-endian encoding; REAL32/64 use IEEE-754.
 Strings use fixed slots and batch VISIBLE_STRING writes must contain a NUL.
-Buffers/arrays are caller-owned and never retained. The final count argument
-must equal the bound count; status and Enable arrays must have that many elements.
-Disabled writes return `XNET_CO_SKIPPED`. Enable=1 permits a write on every call,
-not only on a rising edge.
+Buffers/arrays are caller-owned and never retained. `buffer_size` is the byte
+capacity, at least the sum of bound sizes (6 in the example).
+`entry_status` is a caller-allocated int32 output array: element i reports the
+result for bound variable i. `entry_count` is its element count, not a byte count,
+and must equal the number of bound variables (2 in the example).
+Pass the byte buffer and status array as numeric Array Data Pointers in LabVIEW.
+Every write call attempts all bound entries. LabVIEW/VeriStand decides when to
+call it; there is no enable mask. Bind separate groups or single-entry batches
+when variables must be written independently, rather than rewriting unrelated
+values that may have changed on the network.
 
-Call-wide errors are rejected before any write. Individual failures are recorded
+Call-wide errors leave entry statuses unchanged and are rejected before any write.
+Individual failures are recorded
 per entry; later entries continue and earlier successful writes are not rolled
 back. Overall result is `XNET_CO_PARTIAL_FAILURE` if any entry fails. Failed read
 slots must not be consumed as valid data. Local writes require `local_write`;
 reads require SDO-readable metadata. Bindings invoke current OD callbacks, not
 raw memory writes. Worker and channel writes are serialized: the last successful
 write wins. A batch prevents worker interleaving but is not a rollback transaction.
+
+This replaces the first-edition descriptor-array binding signature and removes
+the write-enable argument and `XNET_CO_SKIPPED`. These are source and binary API
+changes: rebuild C callers and update LabVIEW Call Library Function Nodes.
 
 ## TPDO, faults, and errors
 
@@ -238,6 +251,14 @@ Every operation returns a status from the public header. `get_status()` exposes
 runtime/NMT state, active/pending LSS values, and CAN error flags.
 Hardware bus-off/error counters feed the stack's CAN error status. Overflow flags
 are latched until stack restart/reset so losses remain visible.
+
+Operation results use `XNET_CO_*` (`XNET_CO_OK`, `XNET_CO_INVALID_STATE`, etc.).
+The separate `runtime_state` field uses `XNET_CO_RUNTIME_UNINITIALIZED`,
+`XNET_CO_RUNTIME_STOPPED`, `XNET_CO_RUNTIME_RUNNING`, and `XNET_CO_RUNTIME_FAILED`.
+These runtime names replace the initial `XNET_CO_UNINITIALIZED/STOPPED/RUNNING/FAILED`
+names; their numeric values (0..3) and the binary ABI are unchanged.
+Neither runtime state nor API results are CANopen NMT state or CAN error bitmasks.
+The public header documents each enum value, structure field, and API contract.
 
 `get_last_error()` copies the latest per-handle failure as an atomic code/message
 snapshot. `message_required` includes NUL; insufficient capacity returns

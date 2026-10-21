@@ -41,6 +41,7 @@ void Adapter::start() {
 void Adapter::stop_flush() {
     nxStatus_t first = 0;
     auto retain = [&](nxStatus_t status) { if (first == 0 && status != 0) first = status; };
+    // Stop preserves XNET queues. Attempt every cleanup step, then report the first failure.
     if (input) retain(nxStop(input, nxStartStop_Normal));
     if (output) retain(nxStop(output, nxStartStop_Normal));
     if (input) retain(nxFlush(input));
@@ -53,6 +54,7 @@ void Adapter::close() {
     nxStatus_t first = 0;
     if (output) {
         auto status = nxClear(output);
+        // Keep failed references so a later uninitialize can retry their release.
         if (status == 0) output = 0;
         else first = status;
     }
@@ -114,6 +116,7 @@ CO_ReturnError_t CO_CANsend(CO_CANmodule_t* m, CO_CANtx_t* b) {
         pending.frame.ident = static_cast<uint16_t>(b->ident);
         pending.frame.DLC = b->DLC;
         std::memcpy(pending.frame.data, b->data, 8);
+        // One immutable pending copy per stack buffer bounds the queue and avoids later mutation.
         d.outgoing.push_back(pending);
         b->bufferFull = true;
         return CO_ERROR_NO;
@@ -125,6 +128,7 @@ CO_ReturnError_t CO_CANsend(CO_CANmodule_t* m, CO_CANtx_t* b) {
 void CO_CANclearPendingSyncPDOs(CO_CANmodule_t* m) {
     auto& d = *static_cast<xnet_canopen_device*>(m->CANptr);
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
+    // Only unsent adapter copies are cancellable; flushing XNET would discard unrelated traffic.
     for (auto it = d.outgoing.begin(); it != d.outgoing.end();) {
         if (it->buffer->syncFlag) {
             it->buffer->bufferFull = false;
@@ -140,6 +144,7 @@ void CO_CANmodule_process(CO_CANmodule_t* m) {
     try {
         d.adapter.check(nxReadState(d.adapter.input, nxState_CANComm, sizeof(state), &state, &fault), "read CAN state");
         d.adapter.check(fault, "CAN state fault");
+        // Retain loss indicators until reset, but recompute physical bus state from current counters.
         uint16_t flags = m->CANerrorStatus & (CO_CAN_ERRTX_OVERFLOW | CO_CAN_ERRRX_OVERFLOW | CO_CAN_ERRTX_PDO_LATE);
         auto tx = nxCANComm_Get_TxErrCount(state), rx = nxCANComm_Get_RxErrCount(state);
         if (tx >= 96) flags |= CO_CAN_ERRTX_WARNING;
@@ -152,7 +157,7 @@ void CO_CANmodule_process(CO_CANmodule_t* m) {
         m->CANerrorStatus = flags;
     } catch (const xco::Error& e) {
         d.fail(e.code, e.what());
-        d.state = XNET_CO_FAILED;
+        d.state = XNET_CO_RUNTIME_FAILED;
         d.stopping = true;
     }
 }
@@ -166,6 +171,7 @@ void xnet_canopen_device::transmit() {
         frame.Type = (pending.frame.ident & 0x800) ? nxFrameType_CAN_Remote : nxFrameType_CAN_Data;
         frame.PayloadLength = pending.frame.DLC;
         std::memcpy(frame.Payload, pending.frame.data, 8);
+        // Submit one frame per call so failure cannot ambiguously accept part of a multi-frame write.
         auto status = nxWriteFrame(adapter.output, &frame, sizeof(frame), nxTimeout_None);
         if (status == nxErrOutputQueueOverflow) {
             co->CANmodule->CANerrorStatus |= CO_CAN_ERRTX_OVERFLOW;
@@ -193,6 +199,7 @@ void xnet_canopen_device::receive() {
     size_t offset = 0;
     const auto* raw = reinterpret_cast<const uint8_t*>(storage.data());
     while (offset < bytes) {
+        // XNET stream records have variable padded lengths, even when unsupported frame types arrive.
         xco::require(bytes - offset >= nxSizeofFrameHeader, XNET_CO_XNET_ERROR, "truncated XNET frame header");
         nxFrameCAN_t frame{};
         std::memcpy(&frame, raw + offset, nxSizeofFrameHeader);
@@ -203,6 +210,7 @@ void xnet_canopen_device::receive() {
             CO_CANrxMsg_t message{};
             message.ident = static_cast<uint16_t>(frame.Identifier | (frame.Type == nxFrameType_CAN_Remote ? 0x800 : 0));
             message.DLC = frame.PayloadLength;
+            // Some stack callbacks copy all eight bytes; keep bytes beyond the actual payload zeroed.
             if (frame.Type != nxFrameType_CAN_Remote) std::memcpy(message.data, raw + offset + nxSizeofFrameHeader, message.DLC);
             for (uint16_t i = 0; i < co->CANmodule->rxSize; ++i) {
                 auto& subscription = co->CANmodule->rxArray[i];
@@ -211,7 +219,7 @@ void xnet_canopen_device::receive() {
                     break;
                 }
             }
-            // Service a request before delivering the next frame to single-message protocol mailboxes.
+            // Drain single-message mailboxes before the next frame; the outer loop advances timers once.
             auto reset = CO_process(co, false, 0, nullptr);
             if (reset != CO_RESET_NOT) { reset_stack(reset == CO_RESET_APP); return; }
             if (switching != Switch::none || stopping) return;

@@ -32,6 +32,7 @@ void unclaim(xnet_canopen_device& d) {
 template<class Function> int32_t call(xnet_canopen_handle d, Function function) noexcept {
     if (!d) return XNET_CO_INVALID_ARGUMENT;
     try {
+        // Keep lifecycle ownership even when a call releases the OD lock to join the worker.
         std::lock_guard<std::mutex> lifecycle(d->lifecycle);
         std::unique_lock<std::recursive_mutex> lock(d->mutex);
         return function(*d, lock);
@@ -62,7 +63,7 @@ void xnet_canopen_device::fail(int32_t code, std::string_view message) noexcept 
     error_message[size] = 0;
 }
 void xnet_canopen_device::initialized() const {
-    require(model && co && state != XNET_CO_UNINITIALIZED, XNET_CO_INVALID_STATE, "device is not initialized");
+    require(model && co && state != XNET_CO_RUNTIME_UNINITIALIZED, XNET_CO_INVALID_STATE, "device is not initialized");
 }
 
 void xnet_canopen_device::load_persistent() {
@@ -88,6 +89,7 @@ void xnet_canopen_device::load_persistent() {
 
 void xnet_canopen_device::setup_stack() {
     outgoing.clear();
+    // Extensions point into the old stack allocation; detach them before rebuilding services.
     for (auto& entry : model->entries) entry.extension = nullptr;
     if (co) { CO_delete(co); co = nullptr; }
     model->resolve_node(pending_node);
@@ -144,7 +146,7 @@ void xnet_canopen_device::activate_bitrate(void* context, uint16_t delay) {
         d.outgoing.clear();
         d.switch_deadline = xco::Clock::now() + std::chrono::milliseconds(delay);
     } catch (const Error& e) {
-        d.fail(e.code, e.what()); d.state = XNET_CO_FAILED; d.stopping = true;
+        d.fail(e.code, e.what()); d.state = XNET_CO_RUNTIME_FAILED; d.stopping = true;
     }
 }
 
@@ -153,6 +155,8 @@ bool_t xnet_canopen_device::store(void* context, uint8_t node, uint16_t bitrate)
     const auto saved = xco::Json{{"schema_version", 1}, {"identity", d.model->identity},
         {"node_id", node}, {"bitrate_kbps", bitrate}};
     const auto path = d.persistence_path;
+    // Snapshot before unlocking. Teardown joins this worker, so its context stays alive.
+    // Returning true only after durable storage lets the LSS stack acknowledge honestly.
     d.worker_lock->unlock();
     try {
         xco::write_json_atomic(path, saved);
@@ -176,6 +180,7 @@ void xnet_canopen_device::run() {
             previous = now;
             uint32_t dt = static_cast<uint32_t>(std::min<int64_t>(elapsed, UINT32_MAX));
             if (switching != Switch::none) {
+                // Neither protocol processing nor queued transmission may break LSS silence.
                 if (now >= switch_deadline) {
                     if (switching == Switch::before) {
                         adapter.bitrate(pending_bitrate);
@@ -189,11 +194,13 @@ void xnet_canopen_device::run() {
                 }
             } else {
                 receive();
+                // Receive dispatch can request a reset, stop, or bitrate switch in a callback.
                 if (switching == Switch::none && !stopping) {
                     auto reset = CO_process(co, false, dt, nullptr);
                     if (switching == Switch::none && !stopping) {
                         if (reset != CO_RESET_NOT) reset_stack(reset == CO_RESET_APP);
                         else if (!co->nodeIdUnconfigured) {
+                            // Apply RPDO commands before packing values for this cycle's TPDOs.
                             bool_t sync = CO_process_SYNC(co, dt, nullptr);
                             CO_process_RPDO(co, sync, dt, nullptr);
                             CO_process_TPDO(co, sync, dt, nullptr);
@@ -202,15 +209,16 @@ void xnet_canopen_device::run() {
                     }
                 }
             }
+            // wait_for releases the OD lock, allowing channel calls between worker cycles.
             wake.wait_for(lock, std::chrono::microseconds(model->worker_period_us), [&] { return stopping.load(); });
         }
     } catch (const Error& e) {
-        fail(e.code, e.what()); state = XNET_CO_FAILED; stopping = true;
+        fail(e.code, e.what()); state = XNET_CO_RUNTIME_FAILED; stopping = true;
     } catch (const std::exception& e) {
-        fail(XNET_CO_INTERNAL_ERROR, e.what()); state = XNET_CO_FAILED; stopping = true;
+        fail(XNET_CO_INTERNAL_ERROR, e.what()); state = XNET_CO_RUNTIME_FAILED; stopping = true;
     }
     try { adapter.stop_flush(); }
-    catch (const Error& e) { fail(e.code, e.what()); state = XNET_CO_FAILED; }
+    catch (const Error& e) { fail(e.code, e.what()); state = XNET_CO_RUNTIME_FAILED; }
     for (auto& pending : outgoing) pending.buffer->bufferFull = false;
     outgoing.clear();
     if (co) co->CANmodule->CANnormal = false;
@@ -220,6 +228,7 @@ void xnet_canopen_device::run() {
 void xnet_canopen_device::stop() {
     stopping = true;
     wake.notify_all();
+    // The worker reacquires the OD lock during shutdown; never join while holding it.
     if (worker.joinable()) worker.join();
     std::lock_guard<std::recursive_mutex> lock(mutex);
     initialized();
@@ -227,7 +236,7 @@ void xnet_canopen_device::stop() {
     outgoing.clear();
     switching = Switch::none;
     co->CANmodule->CANnormal = false;
-    if (state != XNET_CO_FAILED) state = XNET_CO_STOPPED;
+    if (state != XNET_CO_RUNTIME_FAILED) state = XNET_CO_RUNTIME_STOPPED;
 }
 
 void xnet_canopen_device::release() {
@@ -240,7 +249,7 @@ void xnet_canopen_device::release() {
     batches.clear();
     unclaim(*this);
     interface_name.clear(); persistence_path.clear();
-    state = XNET_CO_UNINITIALIZED;
+    state = XNET_CO_RUNTIME_UNINITIALIZED;
 }
 
 extern "C" {
@@ -262,7 +271,7 @@ int32_t xnet_canopen_destroy(xnet_canopen_handle handle) {
 int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interface_name,
                                const char* model_path, const char* persistence_path) {
     return call(handle, [&](auto& d, auto& lock) {
-        require(d.state == XNET_CO_UNINITIALIZED, XNET_CO_INVALID_STATE, "initialize requires an uninitialized handle");
+        require(d.state == XNET_CO_RUNTIME_UNINITIALIZED, XNET_CO_INVALID_STATE, "initialize requires an uninitialized handle");
         require(interface_name && *interface_name && model_path && *model_path && persistence_path && *persistence_path,
                 XNET_CO_INVALID_ARGUMENT, "interface, JSON model and persistence paths are required");
         try {
@@ -278,13 +287,14 @@ int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interfac
             d.model->restore(true, d.pending_node);
             d.adapter.open(d.interface_name, d.active_bitrate);
             d.setup_stack();
-            d.state = XNET_CO_STOPPED;
+            d.state = XNET_CO_RUNTIME_STOPPED;
         } catch (const std::exception& original) {
             const std::string reason = original.what();
             lock.unlock();
+            // A failed cleanup retains ownership/resources so uninitialize can retry safely.
             try { d.release(); }
             catch (const std::exception& cleanup) {
-                d.state = XNET_CO_FAILED;
+                d.state = XNET_CO_RUNTIME_FAILED;
                 throw Error(XNET_CO_IO_ERROR, reason + "; cleanup failed: " + cleanup.what() + "; retry uninitialize");
             }
             throw;
@@ -299,16 +309,16 @@ int32_t xnet_canopen_uninitialize(xnet_canopen_handle handle) {
 int32_t xnet_canopen_start(xnet_canopen_handle handle) {
     return call(handle, [](auto& d, auto&) {
         d.initialized();
-        if (d.state == XNET_CO_RUNNING) return XNET_CO_OK;
-        require(d.state == XNET_CO_STOPPED, XNET_CO_INVALID_STATE, "uninitialize a failed device before restarting");
+        if (d.state == XNET_CO_RUNTIME_RUNNING) return XNET_CO_OK;
+        require(d.state == XNET_CO_RUNTIME_STOPPED, XNET_CO_INVALID_STATE, "uninitialize a failed device before restarting");
         try {
             d.setup_stack();
             d.adapter.start();
             CO_CANsetNormalMode(d.co->CANmodule);
             d.stopping = false;
-            d.state = XNET_CO_RUNNING;
+            d.state = XNET_CO_RUNTIME_RUNNING;
             d.worker = std::thread(&xnet_canopen_device::run, &d);
-        } catch (...) { d.state = XNET_CO_FAILED; throw; }
+        } catch (...) { d.state = XNET_CO_RUNTIME_FAILED; throw; }
         return XNET_CO_OK;
     });
 }
@@ -316,55 +326,54 @@ int32_t xnet_canopen_stop(xnet_canopen_handle handle) {
     return call(handle, [](auto& d, auto& lock) { d.initialized(); lock.unlock(); d.stop(); return XNET_CO_OK; });
 }
 
-int32_t xnet_canopen_bind_batch(xnet_canopen_handle handle, const xnet_canopen_binding_t* bindings,
+int32_t xnet_canopen_bind_batch(xnet_canopen_handle handle, const uint16_t* indices,
+                               const uint8_t* subindices, const uint32_t* sizes,
                                uint32_t count, uint32_t* batch_id) {
     return call(handle, [&](auto& d, auto&) {
         d.initialized();
-        require(bindings && batch_id && count > 0 && count <= 4096, XNET_CO_INVALID_ARGUMENT, "invalid batch arguments");
+        require(indices && subindices && sizes && batch_id && count > 0 && count <= 4096,
+                XNET_CO_INVALID_ARGUMENT, "invalid batch arguments");
         require(d.next_batch != 0, XNET_CO_INVALID_STATE, "batch ID space exhausted");
         xco::Batch batch;
         for (uint32_t i = 0; i < count; ++i) {
-            const auto& b = bindings[i];
+            // Slots are byte-packed; scalar alignment must not add padding.
+            const xco::Binding b{indices[i], subindices[i], batch.size, sizes[i]};
             auto& v = d.model->value(b.index, b.subindex);
-            require(!b.reserved && b.size == v.size && b.offset <= 1024 * 1024 && b.size <= 1024 * 1024 - b.offset,
-                    XNET_CO_INVALID_ARGUMENT, "batch size/offset/reserved field mismatch");
+            require(b.size == v.size && b.size <= 1024 * 1024 - batch.size,
+                    XNET_CO_INVALID_ARGUMENT, "batch OD length mismatch or total size exceeds 1 MiB");
             for (const auto& previous : batch.bindings) {
-                require(b.offset >= previous.offset + previous.size || previous.offset >= b.offset + b.size,
-                    XNET_CO_INVALID_ARGUMENT, "overlapping batch buffer ranges");
                 require(b.index != previous.index || b.subindex != previous.subindex, XNET_CO_INVALID_ARGUMENT, "duplicate batch OD variable");
             }
-            batch.size = std::max(batch.size, b.offset + b.size);
+            batch.size += b.size;
             batch.bindings.push_back(b);
         }
+        d.batches.emplace(d.next_batch, std::move(batch));
         *batch_id = d.next_batch++;
-        d.batches.emplace(*batch_id, std::move(batch));
         return XNET_CO_OK;
     });
 }
 
 static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* read_buffer, const uint8_t* write_buffer,
-                        uint32_t buffer_size, const uint8_t* enable, int32_t* statuses, uint32_t count, bool writing) {
+                        uint32_t buffer_size, int32_t* statuses, uint32_t count, bool writing) {
     return call(handle, [&](auto& d, auto&) {
         d.initialized();
-        require(d.state != XNET_CO_FAILED, XNET_CO_INVALID_STATE, "device failed; inspect diagnostics and uninitialize");
+        require(d.state != XNET_CO_RUNTIME_FAILED, XNET_CO_INVALID_STATE, "device failed; inspect diagnostics and uninitialize");
         auto found = d.batches.find(batch_id);
         require(found != d.batches.end(), XNET_CO_NOT_FOUND, "unknown or invalidated batch ID");
         const auto& batch = found->second;
-        require(statuses && (writing ? write_buffer && enable : read_buffer != nullptr) && count == batch.bindings.size(),
-                XNET_CO_INVALID_ARGUMENT, "buffer/status/Enable count mismatch");
+        require(statuses && (writing ? write_buffer != nullptr : read_buffer != nullptr) && count == batch.bindings.size(),
+                XNET_CO_INVALID_ARGUMENT, "buffer/status pointer or entry count mismatch");
         require(buffer_size >= batch.size, XNET_CO_BUFFER_TOO_SMALL, "batch buffer too small");
-        if (writing) for (uint32_t i = 0; i < count; ++i)
-            require(enable[i] <= 1, XNET_CO_INVALID_ARGUMENT, "Enable values must be 0 or 1");
         bool failed = false;
         for (uint32_t i = 0; i < count; ++i) {
             statuses[i] = XNET_CO_OK;
-            if (writing && !enable[i]) { statuses[i] = XNET_CO_SKIPPED; continue; }
             const auto& b = batch.bindings[i];
             auto& v = d.model->value(b.index, b.subindex);
             if ((writing && !v.local_write) || (!writing && !(v.attr & ODA_SDO_R))) {
                 statuses[i] = XNET_CO_ACCESS_ERROR;
             } else {
                 OD_IO_t io{};
+                // Stack resets replace extensions. Resolve a fresh stream rather than caching callbacks.
                 auto result = OD_getSub(OD_find(&d.model->od, b.index), b.subindex, &io, false);
                 OD_size_t transferred = 0;
                 if (result == ODR_OK) {
@@ -388,16 +397,16 @@ static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* 
 
 int32_t xnet_canopen_read_batch(xnet_canopen_handle handle, uint32_t id, uint8_t* buffer,
                                uint32_t size, int32_t* statuses, uint32_t count) {
-    return batch_io(handle, id, buffer, nullptr, size, nullptr, statuses, count, false);
+    return batch_io(handle, id, buffer, nullptr, size, statuses, count, false);
 }
 int32_t xnet_canopen_write_batch(xnet_canopen_handle handle, uint32_t id, const uint8_t* buffer,
-                                uint32_t size, const uint8_t* enable, int32_t* statuses, uint32_t count) {
-    return batch_io(handle, id, nullptr, buffer, size, enable, statuses, count, true);
+                                uint32_t size, int32_t* statuses, uint32_t count) {
+    return batch_io(handle, id, nullptr, buffer, size, statuses, count, true);
 }
 int32_t xnet_canopen_request_tpdo(xnet_canopen_handle handle, uint16_t number) {
     return call(handle, [&](auto& d, auto&) {
         d.initialized();
-        require(d.state == XNET_CO_RUNNING && d.switching == xnet_canopen_device::Switch::none && !d.co->nodeIdUnconfigured
+        require(d.state == XNET_CO_RUNTIME_RUNNING && d.switching == xnet_canopen_device::Switch::none && !d.co->nodeIdUnconfigured
             && CO_NMT_getInternalState(d.co->NMT) == CO_NMT_OPERATIONAL, XNET_CO_INVALID_STATE, "TPDO request requires Operational running device");
         require(number >= 1 && number <= d.model->tpdo_count, XNET_CO_INVALID_ARGUMENT, "invalid one-based TPDO number");
         auto& tpdo = d.co->TPDO[number - 1];
@@ -410,7 +419,7 @@ int32_t xnet_canopen_request_tpdo(xnet_canopen_handle handle, uint16_t number) {
 int32_t xnet_canopen_set_fault(xnet_canopen_handle handle, uint8_t bit, uint16_t code, uint32_t info, uint8_t active) {
     return call(handle, [&](auto& d, auto&) {
         d.initialized();
-        require(d.state == XNET_CO_RUNNING && !d.co->nodeIdUnconfigured, XNET_CO_INVALID_STATE, "fault requires initialized running node");
+        require(d.state == XNET_CO_RUNTIME_RUNNING && !d.co->nodeIdUnconfigured, XNET_CO_INVALID_STATE, "fault requires initialized running node");
         require(bit >= 0x40 && bit <= 0x4f && active <= 1 && (!active || code != 0),
             XNET_CO_INVALID_ARGUMENT, "invalid manufacturer fault bit/code/active");
         CO_error(d.co->em, active != 0, bit, active ? code : CO_EMC_NO_ERROR, info);

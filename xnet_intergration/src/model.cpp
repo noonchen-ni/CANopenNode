@@ -155,6 +155,7 @@ void Model::load(const Json& root) {
         return *objects.back();
     };
     auto var = [&](uint16_t index, Json j) -> Object& { return add(index, {std::move(j)}, true); };
+    // Generate required communication records centrally; custom JSON objects cannot redefine them.
     var(0x1000, scalar("UNSIGNED32", root.value("device_type", Json(0))));
     var(0x1001, scalar("UNSIGNED8", 0));
     std::vector<Json> history{scalar("UNSIGNED8", 0, "rw")};
@@ -199,6 +200,7 @@ void Model::load(const Json& root) {
                 keys(j, {"index", "kind", "type", "size", "values", "access", "pdo", "local_write"}, "ARRAY");
                 require(j.at("values").is_array() && j.at("values").size() <= 254, XNET_CO_MODEL_ERROR, "array requires at most 254 elements");
                 std::vector<Json> members{scalar("UNSIGNED8", j.at("values").size())};
+                // Lower arrays to record descriptors while retaining their external subindex semantics.
                 for (const auto& item : j.at("values")) {
                     Json member = j; member.erase("index"); member.erase("kind"); member.erase("values");
                     member["value"] = item;
@@ -249,6 +251,7 @@ void Model::load(const Json& root) {
                 auto& v = value(index, sub);
                 require((v.attr & (tx ? ODA_TPDO : ODA_RPDO)) != 0 && v.size <= 8, XNET_CO_MODEL_ERROR, "PDO mapping attribute/type mismatch");
                 bytes += v.size;
+                // CiA mapping word: index in bits 31..16, subindex in 15..8, mapped bit length in 7..0.
                 mapping.push_back(scalar("UNSIGNED32", (uint32_t(index) << 16) | (uint32_t(sub) << 8) | (v.size * 8)));
             }
             require(bytes <= 8, XNET_CO_MODEL_ERROR, "PDO payload exceeds 8 bytes");
@@ -256,6 +259,7 @@ void Model::load(const Json& root) {
         }
     };
     pdos("rpdos", false); pdos("tpdos", true);
+    // OD_find uses binary search. Publish pointers only after all owning storage is finalized.
     std::sort(objects.begin(), objects.end(), [](const auto& a, const auto& b) { return a->index < b->index; });
     for (size_t i = 1; i < objects.size(); ++i) require(objects[i - 1]->index != objects[i]->index, XNET_CO_MODEL_ERROR, "duplicate OD index");
     entries.reserve(objects.size() + 1);
@@ -283,6 +287,7 @@ Value& Model::value(uint16_t index, uint8_t sub) {
 }
 
 void Model::restore(bool application, uint8_t node) {
+    // Reset Communication preserves application objects; Reset Node restores both index ranges.
     for (auto& obj : objects) for (auto& v : obj->values) {
         if (obj->index < 0x2000 || application) std::memcpy(v.data(), v.initial.data(), v.size);
     }
@@ -292,6 +297,7 @@ void Model::restore(bool application, uint8_t node) {
 void Model::resolve_node(uint8_t node) {
     for (auto& obj : objects) for (auto& v : obj->values) {
         if (v.node_relative) {
+            // Rebase from immutable defaults, not the previous node's already-resolved identifier.
             uint32_t base; std::memcpy(&base, v.initial.data(), 4);
             base += node == 255 ? 0 : node;
             std::memcpy(v.data(), &base, 4);

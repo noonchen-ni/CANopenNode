@@ -35,6 +35,7 @@ void write_json_atomic(const std::filesystem::path& path, const Json& value) {
     auto directory = path.parent_path();
     require(!directory.empty(), XNET_CO_IO_ERROR, "persistence path must have a parent directory");
     static std::atomic<uint64_t> sequence{0};
+    // Same-directory replacement stays on one filesystem; exclusive creation avoids clobbering a peer.
     const auto temporary = std::filesystem::path(path.string() + ".tmp."
         + std::to_string(Clock::now().time_since_epoch().count()) + "." + std::to_string(sequence++));
     const std::string bytes = value.dump(2) + "\n";
@@ -67,6 +68,8 @@ void write_json_atomic(const std::filesystem::path& path, const Json& value) {
         std::error_code ec; std::filesystem::remove(temporary, ec);
         throw Error(XNET_CO_IO_ERROR, "persistence replacement failed: " + path.string() + ": " + reason);
     }
+    // File fsync protects contents; directory fsync commits the renamed directory entry.
+    // Failure here is reported even though replacement may already have become visible.
     int parent = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     require(parent >= 0, XNET_CO_IO_ERROR, "cannot open persistence directory: " + directory.string());
     const bool synced = ::fsync(parent) == 0;

@@ -371,10 +371,52 @@ void storage_failures() {
     CHECK(xnet_canopen_uninitialize(f.device) == 0);
     f.saved_path = f.directory / "lss.json";
     { std::ofstream file(f.saved_path); file << "{broken"; }
-    CHECK(f.initialize() != 0 && fake::sessions() == 0);
-    std::filesystem::remove(f.saved_path);
-    xco::write_json_atomic(f.saved_path, {{"schema_version", 1}, {"identity", {9, 9, 9, 9}}, {"node_id", 20}, {"bitrate_kbps", 125}});
-    CHECK(f.initialize() == XNET_CO_IO_ERROR);
+    auto check_fallback = [&] {
+        CHECK(f.initialize() == 0 && fake::sessions() == 2);
+        const auto status = f.status();
+        CHECK(status.active_node_id == 10 && status.pending_node_id == 10);
+        CHECK(status.active_bitrate_kbps == 125 && status.pending_bitrate_kbps == 125);
+        CHECK(diagnostic(f.device).find(std::to_string(XNET_CO_IO_ERROR) + ": ") == 0);
+        CHECK(xnet_canopen_uninitialize(f.device) == 0 && fake::sessions() == 0);
+    };
+    check_fallback();
+    xco::Model model; model.load(xco::read_json(f.model_path));
+    const auto valid = xco::Json{{"schema_version", 1}, {"identity", model.identity},
+        {"node_id", 20}, {"bitrate_kbps", 500}};
+    auto bad = valid; bad["identity"] = {9, 9, 9, 9};
+    xco::write_json_atomic(f.saved_path, bad); check_fallback();
+    bad = valid; bad["schema_version"] = 2;
+    xco::write_json_atomic(f.saved_path, bad); check_fallback();
+    bad = valid; bad.erase("bitrate_kbps"); bad["unexpected"] = 0;
+    xco::write_json_atomic(f.saved_path, bad); check_fallback();
+    for (const auto& node : {xco::Json(0), xco::Json(128), xco::Json(256), xco::Json("invalid")}) {
+        bad = valid; bad["node_id"] = node;
+        xco::write_json_atomic(f.saved_path, bad); check_fallback();
+    }
+    for (const auto& rate : {xco::Json(123), xco::Json(1001), xco::Json("invalid")}) {
+        bad = valid; bad["bitrate_kbps"] = rate;
+        xco::write_json_atomic(f.saved_path, bad); check_fallback();
+    }
+    f.saved_path = f.directory;
+    check_fallback();
+}
+
+void reset_with_invalid_persistence() {
+    Fixture f;
+    xco::Model model; model.load(xco::read_json(f.model_path));
+    xco::write_json_atomic(f.saved_path, {{"schema_version", 1}, {"identity", model.identity},
+        {"node_id", 20}, {"bitrate_kbps", 500}});
+    CHECK(f.initialize() == 0);
+    CHECK(f.status().active_node_id == 20 && f.status().active_bitrate_kbps == 500);
+    f.start();
+    { std::ofstream file(f.saved_path); file << "{broken"; }
+    fake::inject(0, {0x81, 20});
+    wait_for([&] { return f.status().active_node_id == 10; });
+    const auto status = f.status();
+    CHECK(status.runtime_state == XNET_CO_RUNTIME_RUNNING);
+    CHECK(status.pending_node_id == 10);
+    CHECK(status.active_bitrate_kbps == 125 && status.pending_bitrate_kbps == 125);
+    CHECK(diagnostic(f.device).find(std::to_string(XNET_CO_IO_ERROR) + ": ") == 0);
 }
 
 void errors_and_cleanup() {
@@ -398,14 +440,22 @@ void errors_and_cleanup() {
     CHECK(xnet_canopen_uninitialize(f.device) == 0 && fake::sessions() == 0);
 }
 
-void interface_exclusivity() {
-    Fixture f; CHECK(f.initialize() == 0);
+void caller_managed_resources() {
+    Fixture f;
+    f.saved_path = std::filesystem::path(".") / std::filesystem::relative(f.saved_path);
+    CHECK(f.initialize("can1") == 0);
+    CHECK(f.device->interface_name == "can1");
+    CHECK(f.device->persistence_path == f.saved_path);
+    CHECK(f.device->persistence_path.is_relative());
     xnet_canopen_handle other; CHECK(xnet_canopen_create(&other) == 0);
     const auto path = (f.directory / "other.json").string();
-    CHECK(xnet_canopen_initialize(other, "can1", f.model_path.string().c_str(), path.c_str()) == XNET_CO_INVALID_STATE);
-    CHECK(fake::sessions() == 2);
-    CHECK(xnet_canopen_initialize(other, "CAN2", f.model_path.string().c_str(), f.saved_path.string().c_str()) == XNET_CO_INVALID_STATE);
-    CHECK(xnet_canopen_initialize(other, "CAN2", f.model_path.string().c_str(), path.c_str()) == 0);
+    CHECK(xnet_canopen_initialize(other, "can1", f.model_path.string().c_str(), path.c_str()) == 0);
+    CHECK(fake::sessions() == 4);
+    CHECK(xnet_canopen_uninitialize(other) == 0);
+    CHECK(xnet_canopen_initialize(other, "CAN2", f.model_path.string().c_str(), f.saved_path.string().c_str()) == 0);
+    CHECK(fake::sessions() == 4);
+    CHECK(xnet_canopen_uninitialize(other) == 0);
+    CHECK(xnet_canopen_initialize(other, "can1", f.model_path.string().c_str(), f.saved_path.string().c_str()) == 0);
     CHECK(fake::sessions() == 4);
     CHECK(xnet_canopen_destroy(other) == 0);
 }
@@ -491,7 +541,8 @@ int main() {
         {"packed batch buffers", packed_batches}, {"batch argument validation and limits", batch_validation},
         {"SDO PDO EMCY NMT", protocol_basics}, {"LSS assignment and resets", lss_assignment_and_resets},
         {"LSS bitrate and persistence", lss_bitrate_and_storage}, {"storage failures", storage_failures},
-        {"errors and cleanup", errors_and_cleanup}, {"interface exclusivity", interface_exclusivity},
+        {"Reset Node with invalid persistence", reset_with_invalid_persistence},
+        {"errors and cleanup", errors_and_cleanup}, {"caller-managed resources", caller_managed_resources},
         {"queues and filtering", queues_and_filtering}, {"concurrent channels", concurrent_channels},
         {"synchronous TPDO requests", synchronous_requests}, {"atomic persistence", persistence_atomicity}};
     int failed = 0;

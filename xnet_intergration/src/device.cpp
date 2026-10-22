@@ -1,7 +1,6 @@
 #include "internal.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -10,25 +9,6 @@ using xco::Error;
 using xco::require;
 
 namespace {
-std::mutex claims_mutex;
-std::map<std::string, xnet_canopen_device*> interfaces;
-std::map<std::filesystem::path, xnet_canopen_device*> files;
-
-void claim(xnet_canopen_device& d) {
-    std::lock_guard<std::mutex> lock(claims_mutex);
-    require(!interfaces.count(d.interface_name), XNET_CO_INVALID_STATE, "XNET interface already owned by another handle");
-    require(!files.count(d.persistence_path), XNET_CO_INVALID_STATE, "persistence path already owned by another handle");
-    interfaces.emplace(d.interface_name, &d);
-    try { files.emplace(d.persistence_path, &d); }
-    catch (...) { interfaces.erase(d.interface_name); throw; }
-}
-void unclaim(xnet_canopen_device& d) {
-    std::lock_guard<std::mutex> lock(claims_mutex);
-    auto it = interfaces.find(d.interface_name);
-    if (it != interfaces.end() && it->second == &d) interfaces.erase(it);
-    auto file = files.find(d.persistence_path);
-    if (file != files.end() && file->second == &d) files.erase(file);
-}
 template<class Function> int32_t call(xnet_canopen_handle d, Function function) noexcept {
     if (!d) return XNET_CO_INVALID_ARGUMENT;
     try {
@@ -69,18 +49,25 @@ void xnet_canopen_device::initialized() const {
 void xnet_canopen_device::load_persistent() {
     auto node = model->startup_node;
     auto rate = model->startup_bitrate;
-    std::error_code ec;
-    const bool exists = std::filesystem::exists(persistence_path, ec);
-    require(!ec, XNET_CO_IO_ERROR, "cannot inspect persistence file: " + ec.message());
-    if (exists) {
-        auto saved = xco::read_json(persistence_path);
-        require(saved.is_object() && saved.size() == 4 && saved.at("schema_version") == 1,
-            XNET_CO_IO_ERROR, "unsupported LSS persistence schema: " + persistence_path.string());
-        require(saved.at("identity") == xco::Json(model->identity), XNET_CO_IO_ERROR, "persistence identity mismatch: " + persistence_path.string());
-        node = static_cast<uint8_t>(xco::unsigned_number(saved.at("node_id"), 255, "saved node ID"));
-        rate = static_cast<uint16_t>(xco::unsigned_number(saved.at("bitrate_kbps"), 1000, "saved bitrate"));
-        require((node >= 1 && node <= 127) || node == 255, XNET_CO_IO_ERROR, "invalid saved node ID");
-        require(xco::valid_bitrate(rate), XNET_CO_IO_ERROR, "invalid saved bitrate");
+    try {
+        if (std::filesystem::exists(persistence_path)) {
+            auto saved = xco::read_json(persistence_path);
+            require(saved.is_object() && saved.size() == 4 && saved.at("schema_version") == 1,
+                XNET_CO_IO_ERROR, "unsupported LSS persistence schema: " + persistence_path.string());
+            require(saved.at("identity") == xco::Json(model->identity), XNET_CO_IO_ERROR, "persistence identity mismatch: " + persistence_path.string());
+            const auto saved_node = static_cast<uint8_t>(xco::unsigned_number(saved.at("node_id"), 255, "saved node ID"));
+            const auto saved_rate = static_cast<uint16_t>(xco::unsigned_number(saved.at("bitrate_kbps"), 1000, "saved bitrate"));
+            require((saved_node >= 1 && saved_node <= 127) || saved_node == 255, XNET_CO_IO_ERROR, "invalid saved node ID");
+            require(xco::valid_bitrate(saved_rate), XNET_CO_IO_ERROR, "invalid saved bitrate");
+            node = saved_node;
+            rate = saved_rate;
+        }
+    } catch (const std::exception& e) {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
+        fail(XNET_CO_IO_ERROR, e.what());
+    } catch (...) {
+        std::lock_guard<std::recursive_mutex> lock(mutex);
+        fail(XNET_CO_IO_ERROR, "cannot load LSS persistence; using model startup settings");
     }
     std::lock_guard<std::recursive_mutex> lock(mutex);
     pending_node = node;
@@ -247,7 +234,6 @@ void xnet_canopen_device::release() {
     if (co) { CO_delete(co); co = nullptr; }
     model.reset();
     batches.clear();
-    unclaim(*this);
     interface_name.clear(); persistence_path.clear();
     state = XNET_CO_RUNTIME_UNINITIALIZED;
 }
@@ -261,7 +247,7 @@ int32_t xnet_canopen_create(xnet_canopen_handle* handle) {
 }
 
 int32_t xnet_canopen_destroy(xnet_canopen_handle handle) {
-    auto result = call(handle, [](auto& d, auto& lock) {
+    auto result = call(handle, [](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>& lock) {
         lock.unlock(); d.release(); return XNET_CO_OK;
     });
     if (result == XNET_CO_OK) delete handle;
@@ -270,16 +256,13 @@ int32_t xnet_canopen_destroy(xnet_canopen_handle handle) {
 
 int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interface_name,
                                const char* model_path, const char* persistence_path) {
-    return call(handle, [&](auto& d, auto& lock) {
+    return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>& lock) {
         require(d.state == XNET_CO_RUNTIME_UNINITIALIZED, XNET_CO_INVALID_STATE, "initialize requires an uninitialized handle");
         require(interface_name && *interface_name && model_path && *model_path && persistence_path && *persistence_path,
                 XNET_CO_INVALID_ARGUMENT, "interface, JSON model and persistence paths are required");
         try {
             d.interface_name = interface_name;
-            std::transform(d.interface_name.begin(), d.interface_name.end(), d.interface_name.begin(),
-                [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-            d.persistence_path = std::filesystem::weakly_canonical(std::filesystem::absolute(persistence_path));
-            claim(d);
+            d.persistence_path = persistence_path;
             d.model = std::make_unique<xco::Model>();
             d.model->load(xco::read_json(model_path));
             d.load_persistent();
@@ -291,7 +274,7 @@ int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interfac
         } catch (const std::exception& original) {
             const std::string reason = original.what();
             lock.unlock();
-            // A failed cleanup retains ownership/resources so uninitialize can retry safely.
+            // A failed cleanup retains resources so uninitialize can retry safely.
             try { d.release(); }
             catch (const std::exception& cleanup) {
                 d.state = XNET_CO_RUNTIME_FAILED;
@@ -304,10 +287,12 @@ int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interfac
 }
 
 int32_t xnet_canopen_uninitialize(xnet_canopen_handle handle) {
-    return call(handle, [](auto& d, auto& lock) { lock.unlock(); d.release(); return XNET_CO_OK; });
+    return call(handle, [](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>& lock) {
+        lock.unlock(); d.release(); return XNET_CO_OK;
+    });
 }
 int32_t xnet_canopen_start(xnet_canopen_handle handle) {
-    return call(handle, [](auto& d, auto&) {
+    return call(handle, [](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
         d.initialized();
         if (d.state == XNET_CO_RUNTIME_RUNNING) return XNET_CO_OK;
         require(d.state == XNET_CO_RUNTIME_STOPPED, XNET_CO_INVALID_STATE, "uninitialize a failed device before restarting");
@@ -323,13 +308,15 @@ int32_t xnet_canopen_start(xnet_canopen_handle handle) {
     });
 }
 int32_t xnet_canopen_stop(xnet_canopen_handle handle) {
-    return call(handle, [](auto& d, auto& lock) { d.initialized(); lock.unlock(); d.stop(); return XNET_CO_OK; });
+    return call(handle, [](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>& lock) {
+        d.initialized(); lock.unlock(); d.stop(); return XNET_CO_OK;
+    });
 }
 
 int32_t xnet_canopen_bind_batch(xnet_canopen_handle handle, const uint16_t* indices,
                                const uint8_t* subindices, const uint32_t* sizes,
                                uint32_t count, uint32_t* batch_id) {
-    return call(handle, [&](auto& d, auto&) {
+    return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
         d.initialized();
         require(indices && subindices && sizes && batch_id && count > 0 && count <= 4096,
                 XNET_CO_INVALID_ARGUMENT, "invalid batch arguments");
@@ -355,7 +342,7 @@ int32_t xnet_canopen_bind_batch(xnet_canopen_handle handle, const uint16_t* indi
 
 static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* read_buffer, const uint8_t* write_buffer,
                         uint32_t buffer_size, int32_t* statuses, uint32_t count, bool writing) {
-    return call(handle, [&](auto& d, auto&) {
+    return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
         d.initialized();
         require(d.state != XNET_CO_RUNTIME_FAILED, XNET_CO_INVALID_STATE, "device failed; inspect diagnostics and uninitialize");
         auto found = d.batches.find(batch_id);
@@ -404,7 +391,7 @@ int32_t xnet_canopen_write_batch(xnet_canopen_handle handle, uint32_t id, const 
     return batch_io(handle, id, nullptr, buffer, size, statuses, count, true);
 }
 int32_t xnet_canopen_request_tpdo(xnet_canopen_handle handle, uint16_t number) {
-    return call(handle, [&](auto& d, auto&) {
+    return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
         d.initialized();
         require(d.state == XNET_CO_RUNTIME_RUNNING && d.switching == xnet_canopen_device::Switch::none && !d.co->nodeIdUnconfigured
             && CO_NMT_getInternalState(d.co->NMT) == CO_NMT_OPERATIONAL, XNET_CO_INVALID_STATE, "TPDO request requires Operational running device");
@@ -417,7 +404,7 @@ int32_t xnet_canopen_request_tpdo(xnet_canopen_handle handle, uint16_t number) {
     });
 }
 int32_t xnet_canopen_set_fault(xnet_canopen_handle handle, uint8_t bit, uint16_t code, uint32_t info, uint8_t active) {
-    return call(handle, [&](auto& d, auto&) {
+    return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
         d.initialized();
         require(d.state == XNET_CO_RUNTIME_RUNNING && !d.co->nodeIdUnconfigured, XNET_CO_INVALID_STATE, "fault requires initialized running node");
         require(bit >= 0x40 && bit <= 0x4f && active <= 1 && (!active || code != 0),
@@ -427,7 +414,7 @@ int32_t xnet_canopen_set_fault(xnet_canopen_handle handle, uint8_t bit, uint16_t
     });
 }
 int32_t xnet_canopen_get_status(xnet_canopen_handle handle, xnet_canopen_status_t* status) {
-    return call(handle, [&](auto& d, auto&) {
+    return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
         require(status != nullptr, XNET_CO_INVALID_ARGUMENT, "status output is required");
         *status = {};
         status->runtime_state = d.state;
@@ -451,6 +438,8 @@ int32_t xnet_canopen_get_last_error(xnet_canopen_handle handle, int32_t* code, c
     return XNET_CO_OK;
 }
 int32_t xnet_canopen_clear_error(xnet_canopen_handle handle) {
-    return call(handle, [](auto& d, auto&) { d.fail(0, ""); return XNET_CO_OK; });
+    return call(handle, [](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
+        d.fail(0, ""); return XNET_CO_OK;
+    });
 }
 } // extern "C"

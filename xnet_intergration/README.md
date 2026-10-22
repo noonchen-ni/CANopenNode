@@ -64,7 +64,8 @@ C++, and executable linker flags.
 7. `xnet_canopen_uninitialize(handle)` before loading another model.
 8. `xnet_canopen_destroy(handle)`; it also stops/uninitializes if necessary.
 
-All paths/name strings are copied during initialization. Supply an explicit
+All paths/name strings are copied without normalization during initialization.
+The caller is responsible for correct interface names and paths. Supply an explicit
 writable persistence file path per device. Its parent directory must already
 exist before storing LSS configuration. The file itself need not exist.
 
@@ -79,7 +80,7 @@ values and pending LSS settings. Reset Node restores all OD defaults and reloads
 saved/startup LSS settings. Both rebuild services without changing the host
 handle or OD structure; batch access resolves current extensions each call.
 
-Uninitialize releases sessions, OD, stack, and interface ownership and invalidates
+Uninitialize releases sessions, OD, and stack and invalidates
 all batch IDs. IDs are not reused within a handle. Diagnostics survive until
 explicitly cleared or the handle is destroyed.
 
@@ -92,10 +93,10 @@ The caller must coordinate destroy with every other call and must never pass a
 stale, fabricated, or already destroyed handle. A failed destroy retains the
 handle so cleanup can be retried. Null handles return an argument error.
 
-Interface and persistence-path exclusivity is enforced within this library
-instance/process. Interface names are normalized to uppercase; use canonical
-physical names such as `CAN1`, not different aliases for the same port. NI-XNET
-remains responsible for detecting conflicting external usage.
+The caller (for example, LabVIEW) must enforce interface and persistence-path
+exclusivity, including across library unload/reload cycles. The library does not
+track duplicate interfaces or paths. NI-XNET remains responsible for detecting
+conflicting external usage.
 
 ## JSON model version 1
 
@@ -287,8 +288,10 @@ processing/transmission is suspended during those intervals. Adapter failure
 marks the worker FAILED; activation has no fabricated success response.
 
 Store writes a version-1 JSON file with identity, pending node ID, and pending
-bitrate. Missing file uses startup settings; an existing invalid/unreadable or
-identity-mismatched file is an error. Saved values override only startup LSS
+bitrate. A missing file or any exception while loading it uses both model startup
+settings. Invalid, unreadable, or identity-mismatched files do not fail initialization
+or Reset Node; load exceptions are recorded as `XNET_CO_IO_ERROR` in diagnostics.
+Saved values override only startup LSS
 settings. Load occurs at initialize and Reset Node, not Reset Communication or
 stop/start. Ordinary channel writes and temporary LSS changes do not write disk.
 
@@ -301,8 +304,8 @@ OD store/restore objects `0x1010/0x1011` are not implemented by this LSS mechani
 
 ## Validation and limits
 
-Fourteen automated groups exercise model validation and numeric limits, batch
-Enable/partial errors/string buffers, concurrent callers, ownership and cleanup,
+Automated groups exercise model validation and numeric limits, batch
+Enable/partial errors/string buffers, concurrent callers, caller-managed resources and cleanup,
 real SDO/PDO/NMT/EMCY traffic through the stack, LSS selection/inquiry/node-ID
 changes, bitrate silence sequencing, persistence/reload/failure paths, and
 synchronous manual requests. A C source verifies the public header and layouts.

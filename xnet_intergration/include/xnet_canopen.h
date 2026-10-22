@@ -23,7 +23,7 @@ typedef struct xnet_canopen_device* xnet_canopen_handle;
 enum {
     XNET_CO_OK = 0,                 /**< Operation or batch entry completed successfully. */
     XNET_CO_INVALID_ARGUMENT = -1,  /**< Invalid pointer, count, value, or buffer layout. */
-    XNET_CO_INVALID_STATE = -2,     /**< Lifecycle/NMT state or resource ownership forbids the operation. */
+    XNET_CO_INVALID_STATE = -2,     /**< Lifecycle/NMT state forbids the operation. */
     XNET_CO_MODEL_ERROR = -3,       /**< JSON schema, OD description, or configured value is invalid. */
     XNET_CO_IO_ERROR = -4,          /**< File access, persistence, or cleanup failed. */
     XNET_CO_XNET_ERROR = -5,        /**< XNET call or adapter communication failed; inspect the message. */
@@ -70,10 +70,12 @@ XNET_CANOPEN_API int32_t xnet_canopen_create(xnet_canopen_handle* handle);
 XNET_CANOPEN_API int32_t xnet_canopen_destroy(xnet_canopen_handle handle);
 
 /**
- * Claim an interface and construct the OD/stack from a version-1 JSON model.
+ * Open an interface and construct the OD/stack from a version-1 JSON model.
  * Requires an uninitialized handle and nonempty interface/model/persistence paths.
- * Strings are copied; a missing persistence file uses model startup settings,
- * whereas an invalid existing file is an error. Sessions are not started.
+ * Strings are copied without normalization; caller ensures correct names/paths
+ * and exclusive interface/persistence-file use. Missing or unloadable persistence
+ * uses model startup settings; load exceptions are recorded in diagnostics
+ * without failing initialization. Sessions are not started.
  * Failure releases partial resources when possible; inspect diagnostics and
  * retry uninitialize if cleanup also fails. See README.md for the JSON schema.
  */
@@ -82,7 +84,7 @@ XNET_CANOPEN_API int32_t xnet_canopen_initialize(
     const char* model_path, const char* persistence_path);
 
 /**
- * Stop/join the worker and release sessions, stack, OD, ownership, and batch IDs.
+ * Stop/join the worker and release sessions, stack, OD, and batch IDs.
  * Retains the context and diagnostics for another initialize. Also succeeds for
  * an already uninitialized context; cleanup failure is reported and retryable.
  */
@@ -98,7 +100,7 @@ XNET_CANOPEN_API int32_t xnet_canopen_start(xnet_canopen_handle handle);
 
 /**
  * Stop/join processing and discard pending network traffic, retaining OD values,
- * configuration, bindings, and ownership. Already stopped is a no-op.
+ * configuration, bindings, and sessions. Already stopped is a no-op.
  * Requires initialization. This is not CANopen NMT Stop, which keeps processing.
  */
 XNET_CANOPEN_API int32_t xnet_canopen_stop(xnet_canopen_handle handle);

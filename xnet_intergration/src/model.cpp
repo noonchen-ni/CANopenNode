@@ -61,7 +61,7 @@ static uint32_t type_size(const std::string& type, const Json& j) {
     return size;
 }
 
-static Value make_value(const Json& j, uint8_t sub, bool application) {
+static Value make_value(const Json& j, uint8_t sub, bool is_application_object) {
     keys(j, {"subindex", "type", "size", "value", "access", "pdo", "local_write"}, "OD value");
     Value v;
     v.sub = sub;
@@ -77,7 +77,7 @@ static Value make_value(const Json& j, uint8_t sub, bool application) {
     if (pdo == "rx" || pdo == "both") v.attr |= ODA_RPDO;
     require(pdo == "none" || (v.type != "VISIBLE_STRING" && v.type != "OCTET_STRING"),
             XNET_CO_MODEL_ERROR, "string PDO mapping is not supported");
-    v.local_write = application && j.value("local_write", false);
+    v.allows_local_write = is_application_object && j.value("local_write", false);
     const auto& data = j.at("value");
     if (v.type == "VISIBLE_STRING") {
         const auto text = data.get<std::string>();
@@ -140,15 +140,15 @@ void Model::load(const Json& root) {
     const char* id_keys[] = {"vendor_id", "product_code", "revision_number", "serial_number"};
     for (size_t i = 0; i < 4; ++i) identity[i] = static_cast<uint32_t>(unsigned_number(id.at(id_keys[i]), UINT32_MAX, id_keys[i]));
     require(identity[0] != 0 && identity[3] != 0, XNET_CO_MODEL_ERROR, "provide nonzero vendor_id and unique serial_number");
-    auto add = [&](uint16_t index, std::vector<Json> subs, bool variable, bool application = false) -> Object& {
+    auto add = [&](uint16_t index, std::vector<Json> subs, bool is_var_object, bool is_application_object = false) -> Object& {
         auto obj = std::make_unique<Object>();
         obj->index = index;
-        obj->variable = variable;
+        obj->is_var_object = is_var_object;
         std::set<uint8_t> seen;
         for (size_t i = 0; i < subs.size(); ++i) {
             uint8_t sub = static_cast<uint8_t>(unsigned_number(subs[i].value("subindex", Json(i)), 254, "subindex"));
             require(seen.insert(sub).second, XNET_CO_MODEL_ERROR, "duplicate subindex");
-            obj->values.push_back(make_value(subs[i], sub, application));
+            obj->values.push_back(make_value(subs[i], sub, is_application_object));
         }
         require(!obj->values.empty() && obj->values.size() <= 255 && seen.count(0), XNET_CO_MODEL_ERROR, "missing subindex 0 or too many subentries");
         objects.push_back(std::move(obj));
@@ -164,7 +164,7 @@ void Model::load(const Json& root) {
     var(0x1005, scalar("UNSIGNED32", 0x80));
     var(0x1006, scalar("UNSIGNED32", 0));
     var(0x1007, scalar("UNSIGNED32", 0));
-    auto& em = var(0x1014, scalar("UNSIGNED32", 0x80)); em.values[0].node_relative = true;
+    auto& em = var(0x1014, scalar("UNSIGNED32", 0x80)); em.values[0].is_node_relative = true;
     var(0x1015, scalar("UNSIGNED16", 0));
     var(0x1017, scalar("UNSIGNED16", root.value("heartbeat_ms", Json(1000)), "rw"));
     std::vector<Json> identity_subs{scalar("UNSIGNED8", 4)};
@@ -172,7 +172,7 @@ void Model::load(const Json& root) {
     add(0x1018, identity_subs, false);
     var(0x1019, scalar("UNSIGNED8", 0));
     auto& sdo = add(0x1200, {scalar("UNSIGNED8", 2), scalar("UNSIGNED32", 0x600), scalar("UNSIGNED32", 0x580)}, false);
-    sdo.values[1].node_relative = sdo.values[2].node_relative = true;
+    sdo.values[1].is_node_relative = sdo.values[2].is_node_relative = true;
     require(root.at("objects").is_array() && root.at("objects").size() <= 4096, XNET_CO_MODEL_ERROR, "objects must be an array of at most 4096 entries");
     for (const auto& j : root.at("objects")) {
         const uint16_t index = static_cast<uint16_t>(unsigned_number(j.at("index"), 0xbfff, "index"));
@@ -193,7 +193,7 @@ void Model::load(const Json& root) {
                 require(zero.type == "UNSIGNED8", XNET_CO_MODEL_ERROR, "record subindex 0 must be UNSIGNED8");
                 auto highest = std::max_element(object.values.begin(), object.values.end(),
                     [](const Value& a, const Value& b) { return a.sub < b.sub; })->sub;
-                require(*static_cast<const uint8_t*>(zero.data()) == highest && !zero.local_write
+                require(*static_cast<const uint8_t*>(zero.data()) == highest && !zero.allows_local_write
                     && !(zero.attr & (ODA_SDO_W | ODA_TRPDO)), XNET_CO_MODEL_ERROR,
                     "record subindex 0 must be read-only, non-mappable, and contain the highest subindex");
             } else if (kind == "array") {
@@ -213,33 +213,33 @@ void Model::load(const Json& root) {
             throw Error(XNET_CO_MODEL_ERROR, where.str());
         }
     }
-    auto pdos = [&](const char* key, bool tx) {
+    auto pdos = [&](const char* key, bool is_transmit_pdo) {
         const Json list = root.value(key, Json::array());
         require(list.is_array() && list.size() <= 4, XNET_CO_MODEL_ERROR, std::string(key) + " supports at most four PDOs");
-        if (tx) tpdo_count = static_cast<uint16_t>(list.size()); else rpdo_count = static_cast<uint16_t>(list.size());
+        if (is_transmit_pdo) tpdo_count = static_cast<uint16_t>(list.size()); else rpdo_count = static_cast<uint16_t>(list.size());
         for (size_t i = 0; i < list.size(); ++i) {
             const auto& j = list[i];
             keys(j, {"cob_id", "transmission_type", "event_ms", "inhibit_100us", "mapping"}, key);
             const uint32_t type = static_cast<uint32_t>(unsigned_number(j.value("transmission_type", Json(255)), 255, "transmission_type"));
             require(type <= 240 || type >= 254, XNET_CO_MODEL_ERROR, "unsupported PDO transmission type");
-            const auto default_id = static_cast<uint32_t>((tx ? 0x180 : 0x200) + i * 0x100);
+            const auto default_id = static_cast<uint32_t>((is_transmit_pdo ? 0x180 : 0x200) + i * 0x100);
             const uint32_t cob = static_cast<uint32_t>(unsigned_number(j.value("cob_id", Json(default_id)), 0x7ff, "cob_id"));
             require(!j.contains("cob_id") || !CO_IS_RESTRICTED_CAN_ID(cob), XNET_CO_MODEL_ERROR, "restricted PDO COB-ID");
-            const uint16_t comm_index = static_cast<uint16_t>((tx ? 0x1800 : 0x1400) + i);
-            std::vector<Json> comm{scalar("UNSIGNED8", tx ? 6 : 5), scalar("UNSIGNED32", cob), scalar("UNSIGNED8", type)};
-            if (tx) {
+            const uint16_t comm_index = static_cast<uint16_t>((is_transmit_pdo ? 0x1800 : 0x1400) + i);
+            std::vector<Json> comm{scalar("UNSIGNED8", is_transmit_pdo ? 6 : 5), scalar("UNSIGNED32", cob), scalar("UNSIGNED8", type)};
+            if (is_transmit_pdo) {
                 comm.push_back(scalar("UNSIGNED16", j.value("inhibit_100us", Json(0))));
                 comm.push_back(scalar("UNSIGNED8", 0));
             } else {
                 Json timeout = scalar("UNSIGNED16", j.value("event_ms", Json(0))); timeout["subindex"] = 5;
                 comm.push_back(timeout);
             }
-            if (tx) {
+            if (is_transmit_pdo) {
                 comm.push_back(scalar("UNSIGNED16", j.value("event_ms", Json(0))));
                 comm.push_back(scalar("UNSIGNED8", 0));
             }
             auto& comm_obj = add(comm_index, comm, false);
-            comm_obj.values[1].node_relative = !j.contains("cob_id");
+            comm_obj.values[1].is_node_relative = !j.contains("cob_id");
             require(j.at("mapping").is_array() && !j.at("mapping").empty() && j.at("mapping").size() <= 8,
                     XNET_CO_MODEL_ERROR, "PDO mapping requires 1..8 entries");
             std::vector<Json> mapping{scalar("UNSIGNED8", j.at("mapping").size())};
@@ -249,13 +249,13 @@ void Model::load(const Json& root) {
                 uint16_t index = static_cast<uint16_t>(unsigned_number(m.at("index"), 0xbfff, "mapping index"));
                 uint8_t sub = static_cast<uint8_t>(unsigned_number(m.value("subindex", Json(0)), 254, "mapping subindex"));
                 auto& v = value(index, sub);
-                require((v.attr & (tx ? ODA_TPDO : ODA_RPDO)) != 0 && v.size <= 8, XNET_CO_MODEL_ERROR, "PDO mapping attribute/type mismatch");
+                require((v.attr & (is_transmit_pdo ? ODA_TPDO : ODA_RPDO)) != 0 && v.size <= 8, XNET_CO_MODEL_ERROR, "PDO mapping attribute/type mismatch");
                 bytes += v.size;
                 // CiA mapping word: index in bits 31..16, subindex in 15..8, mapped bit length in 7..0.
                 mapping.push_back(scalar("UNSIGNED32", (uint32_t(index) << 16) | (uint32_t(sub) << 8) | (v.size * 8)));
             }
             require(bytes <= 8, XNET_CO_MODEL_ERROR, "PDO payload exceeds 8 bytes");
-            add(static_cast<uint16_t>((tx ? 0x1a00 : 0x1600) + i), mapping, false);
+            add(static_cast<uint16_t>((is_transmit_pdo ? 0x1a00 : 0x1600) + i), mapping, false);
         }
     };
     pdos("rpdos", false); pdos("tpdos", true);
@@ -265,7 +265,7 @@ void Model::load(const Json& root) {
     entries.reserve(objects.size() + 1);
     for (auto& obj : objects) {
         OD_entry_t e{}; e.index = obj->index; e.subEntriesCount = static_cast<uint8_t>(obj->values.size());
-        if (obj->variable) {
+        if (obj->is_var_object) {
             auto& v = obj->values[0]; obj->var = {v.data(), v.attr, v.size};
             e.odObjectType = ODT_VAR; e.odObject = &obj->var;
         } else {
@@ -302,9 +302,9 @@ void Model::restore(bool reset_all_objects, uint8_t node) {
 void Model::resolve_node(uint8_t node) {
     // Keep this separate from restore(): stack rebuilds during start/restart need
     // node-dependent COB-IDs and collision checks without resetting other OD values.
-    // Only values explicitly marked node_relative are rewritten.
+    // Only values explicitly marked is_node_relative are rewritten.
     for (auto& obj : objects) for (auto& v : obj->values) {
-        if (v.node_relative) {
+        if (v.is_node_relative) {
             // Rebase from immutable defaults, not the previous node's already-resolved identifier.
             // This makes repeated resolution idempotent. Node 255 is unconfigured,
             // so retain the base identifier until LSS assigns a usable node ID.

@@ -137,7 +137,7 @@ void xnet_canopen_device::activate_bitrate(void* context, uint16_t delay) {
         d.outgoing.clear();
         d.switch_deadline = xco::Clock::now() + std::chrono::milliseconds(delay);
     } catch (const Error& e) {
-        d.fail(e.code, e.what()); d.state = XNET_CO_RUNTIME_FAILED; d.stopping = true;
+        d.fail(e.code, e.what()); d.state = XNET_CO_RUNTIME_FAILED; d.stop_requested = true;
     }
 }
 
@@ -165,7 +165,7 @@ void xnet_canopen_device::run() {
     worker_lock = &lock;
     auto previous = xco::Clock::now();
     try {
-        while (!stopping) {
+        while (!stop_requested) {
             auto now = xco::Clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - previous).count();
             previous = now;
@@ -186,9 +186,9 @@ void xnet_canopen_device::run() {
             } else {
                 receive();
                 // Receive dispatch can request a reset, stop, or bitrate switch in a callback.
-                if (switching == Switch::none && !stopping) {
+                if (switching == Switch::none && !stop_requested) {
                     auto reset = CO_process(co, false, dt, nullptr);
-                    if (switching == Switch::none && !stopping) {
+                    if (switching == Switch::none && !stop_requested) {
                         if (reset != CO_RESET_NOT) reset_stack(reset == CO_RESET_APP);
                         else if (!co->nodeIdUnconfigured) {
                             // Apply RPDO commands before packing values for this cycle's TPDOs.
@@ -196,17 +196,17 @@ void xnet_canopen_device::run() {
                             CO_process_RPDO(co, sync, dt, nullptr);
                             CO_process_TPDO(co, sync, dt, nullptr);
                         }
-                        if (!stopping) transmit();
+                        if (!stop_requested) transmit();
                     }
                 }
             }
             // wait_for releases the OD lock, allowing channel calls between worker cycles.
-            wake.wait_for(lock, std::chrono::microseconds(model->worker_period_us), [&] { return stopping.load(); });
+            wake.wait_for(lock, std::chrono::microseconds(model->worker_period_us), [&] { return stop_requested.load(); });
         }
     } catch (const Error& e) {
-        fail(e.code, e.what()); state = XNET_CO_RUNTIME_FAILED; stopping = true;
+        fail(e.code, e.what()); state = XNET_CO_RUNTIME_FAILED; stop_requested = true;
     } catch (const std::exception& e) {
-        fail(XNET_CO_INTERNAL_ERROR, e.what()); state = XNET_CO_RUNTIME_FAILED; stopping = true;
+        fail(XNET_CO_INTERNAL_ERROR, e.what()); state = XNET_CO_RUNTIME_FAILED; stop_requested = true;
     }
     try { adapter.stop_flush(); }
     catch (const Error& e) { fail(e.code, e.what()); state = XNET_CO_RUNTIME_FAILED; }
@@ -217,7 +217,7 @@ void xnet_canopen_device::run() {
 }
 
 void xnet_canopen_device::stop() {
-    stopping = true;
+    stop_requested = true;
     wake.notify_all();
     // The worker reacquires the OD lock during shutdown; never join while holding it.
     if (worker.joinable()) worker.join();
@@ -304,7 +304,7 @@ int32_t xnet_canopen_start(xnet_canopen_handle handle) {
             d.setup_stack();
             d.adapter.start();
             CO_CANsetNormalMode(d.co->CANmodule);
-            d.stopping = false;
+            d.stop_requested = false;
             d.state = XNET_CO_RUNTIME_RUNNING;
             d.worker = std::thread(&xnet_canopen_device::run, &d);
         } catch (...) { d.state = XNET_CO_RUNTIME_FAILED; throw; }
@@ -345,22 +345,22 @@ int32_t xnet_canopen_bind_batch(xnet_canopen_handle handle, const uint16_t* indi
 }
 
 static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* read_buffer, const uint8_t* write_buffer,
-                        uint32_t buffer_size, int32_t* statuses, uint32_t count, bool writing) {
+                        uint32_t buffer_size, int32_t* statuses, uint32_t count, bool is_write) {
     return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
         d.initialized();
         require(d.state != XNET_CO_RUNTIME_FAILED, XNET_CO_INVALID_STATE, "device failed; inspect diagnostics and uninitialize");
         auto found = d.batches.find(batch_id);
         require(found != d.batches.end(), XNET_CO_NOT_FOUND, "unknown or invalidated batch ID");
         const auto& batch = found->second;
-        require(statuses && (writing ? write_buffer != nullptr : read_buffer != nullptr) && count == batch.bindings.size(),
+        require(statuses && (is_write ? write_buffer != nullptr : read_buffer != nullptr) && count == batch.bindings.size(),
                 XNET_CO_INVALID_ARGUMENT, "buffer/status pointer or entry count mismatch");
         require(buffer_size >= batch.size, XNET_CO_BUFFER_TOO_SMALL, "batch buffer too small");
-        bool failed = false;
+        bool has_entry_errors = false;
         for (uint32_t i = 0; i < count; ++i) {
             statuses[i] = XNET_CO_OK;
             const auto& b = batch.bindings[i];
             auto& v = d.model->value(b.index, b.subindex);
-            if ((writing && !v.local_write) || (!writing && !(v.attr & ODA_SDO_R))) {
+            if ((is_write && !v.allows_local_write) || (!is_write && !(v.attr & ODA_SDO_R))) {
                 statuses[i] = XNET_CO_ACCESS_ERROR;
             } else {
                 OD_IO_t io{};
@@ -368,21 +368,21 @@ static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* 
                 auto result = OD_getSub(OD_find(&d.model->od, b.index), b.subindex, &io, false);
                 OD_size_t transferred = 0;
                 if (result == ODR_OK) {
-                    if (writing && v.type == "BOOLEAN" && write_buffer[b.offset] > 1) result = ODR_INVALID_VALUE;
-                    else if (writing && v.type == "VISIBLE_STRING"
+                    if (is_write && v.type == "BOOLEAN" && write_buffer[b.offset] > 1) result = ODR_INVALID_VALUE;
+                    else if (is_write && v.type == "VISIBLE_STRING"
                         && !std::memchr(write_buffer + b.offset, 0, b.size)) result = ODR_INVALID_VALUE;
-                    else if (writing) result = io.write(&io.stream, write_buffer + b.offset, b.size, &transferred);
+                    else if (is_write) result = io.write(&io.stream, write_buffer + b.offset, b.size, &transferred);
                     else result = io.read(&io.stream, read_buffer + b.offset, b.size, &transferred);
                 }
                 if (result != ODR_OK || transferred != b.size) statuses[i] = XNET_CO_ACCESS_ERROR;
             }
             if (statuses[i] < 0) {
-                failed = true;
+                has_entry_errors = true;
                 d.fail(statuses[i], "batch entry " + std::to_string(i) + " OD " + std::to_string(b.index)
-                    + ":" + std::to_string(b.subindex) + (writing ? " write failed" : " read failed"));
+                    + ":" + std::to_string(b.subindex) + (is_write ? " write failed" : " read failed"));
             }
         }
-        return failed ? XNET_CO_PARTIAL_FAILURE : XNET_CO_OK;
+        return has_entry_errors ? XNET_CO_PARTIAL_FAILURE : XNET_CO_OK;
     });
 }
 

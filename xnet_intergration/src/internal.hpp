@@ -50,8 +50,8 @@ struct Value {
     uint32_t size = 0; /**< Logical byte length, excluding storage padding; includes string NUL capacity. */
     uint8_t sub = 0; /**< Subindex within the containing OD object. */
     OD_attr_t attr = 0; /**< CANopenNode access, PDO mapping, string, and multibyte attribute flags. */
-    bool local_write = false; /**< Allows host batch writes; independent of network SDO write permission. */
-    bool node_relative = false; /**< Live uint32_t COB-ID is its default base plus node ID (unless unconfigured). */
+    bool allows_local_write = false; /**< Allows host batch writes; independent of network SDO write permission. */
+    bool is_node_relative = false; /**< Live uint32_t COB-ID is its default base plus node ID (unless unconfigured). */
     /** Address published to OD descriptors; stable while storage is not resized. */
     void* data() { return storage.data(); }
 };
@@ -60,12 +60,16 @@ struct Value {
  * Owns all subentries and CANopenNode descriptors for one 16-bit OD index.
  * JSON ARRAY and RECORD objects both use record descriptors with per-subentry
  * attributes and storage; a scalar VAR instead uses the single var descriptor.
+ * A descriptor is non-owning metadata: a pointer to live bytes plus their access
+ * flags and length (and subindex for a record). It does not duplicate the value.
+ * CANopenNode reaches values[0].storage through var.dataOrig for a VAR, or each
+ * Value's storage through the corresponding record descriptor for a REC.
  */
 struct Object {
     uint16_t index = 0; /**< OD index shared by all values in this object. */
-    bool variable = false; /**< Selects ODT_VAR when true, ODT_REC otherwise. */
+    bool is_var_object = false; /**< True for one subentry at index:0 (ODT_VAR), false for ODT_REC; not mutability. */
     std::vector<Value> values; /**< Owning subentry storage, finalized before publishing descriptors. */
-    OD_obj_var_t var{}; /**< Scalar descriptor pointing into values[0]; used only for VAR. */
+    OD_obj_var_t var{}; /**< Non-owning view of values[0]: data pointer, access flags, and byte length; VAR only. */
     std::vector<OD_obj_record_t> record; /**< Compound descriptors pointing into values; used only for REC. */
 };
 
@@ -117,7 +121,7 @@ struct Batch {
  */
 struct Adapter {
     nxSessionRef_t input = 0, output = 0; /**< Input/output stream references, respectively; 0 means none owned. */
-    bool started = false; /**< Both starts completed; cleared by stop/close, not a live hardware-state query. */
+    bool sessions_started = false; /**< Both starts completed; cleared by stop/close, not a live hardware-state query. */
     void open(const std::string& name, uint16_t bitrate);
     void bitrate(uint16_t kbps);
     void start();
@@ -140,7 +144,7 @@ struct xnet_canopen_device {
     std::recursive_mutex mutex; /**< Protects OD/runtime state; recursive for stack callbacks into the driver. */
     std::condition_variable_any wake; /**< Interrupts the worker's timed wait when shutdown is requested. */
     std::thread worker; /**< Protocol/frame-processing thread; joined before releasing its resources. */
-    std::atomic<bool> stopping{false}; /**< Shutdown request visible even when the worker releases mutex. */
+    std::atomic<bool> stop_requested{false}; /**< Shutdown request visible even when the worker releases mutex. */
     uint32_t state = XNET_CO_RUNTIME_UNINITIALIZED; /**< XNET_CO_RUNTIME_* lifecycle state, not NMT state. */
     int32_t error_code = 0; /**< Latest per-handle XNET_CO_* diagnostic code; 0 when cleared. */
     std::array<char, 2048> error_message{}; /**< NUL-terminated diagnostic text, truncated to fit. */

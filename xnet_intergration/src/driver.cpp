@@ -35,7 +35,7 @@ void Adapter::bitrate(uint16_t kbps) {
 void Adapter::start() {
     check(nxStart(input, nxStartStop_Normal), "start input");
     check(nxStart(output, nxStartStop_Normal), "start output");
-    started = true;
+    sessions_started = true;
 }
 
 void Adapter::stop_flush() {
@@ -46,7 +46,7 @@ void Adapter::stop_flush() {
     if (output) retain(nxStop(output, nxStartStop_Normal));
     if (input) retain(nxFlush(input));
     if (output) retain(nxFlush(output));
-    started = false;
+    sessions_started = false;
     check(first, "stop/flush sessions");
 }
 
@@ -63,7 +63,7 @@ void Adapter::close() {
         if (status == 0) input = 0;
         else if (first == 0) first = status;
     }
-    started = false;
+    sessions_started = false;
     check(first, "clear sessions");
 }
 } // namespace xco
@@ -158,7 +158,7 @@ void CO_CANmodule_process(CO_CANmodule_t* m) {
     } catch (const xco::Error& e) {
         d.fail(e.code, e.what());
         d.state = XNET_CO_RUNTIME_FAILED;
-        d.stopping = true;
+        d.stop_requested = true;
     }
 }
 } // extern "C"
@@ -222,7 +222,7 @@ void xnet_canopen_device::receive() {
             // Drain single-message mailboxes before the next frame; the outer loop advances timers once.
             auto reset = CO_process(co, false, 0, nullptr);
             if (reset != CO_RESET_NOT) { reset_stack(reset == CO_RESET_APP); return; }
-            if (switching != Switch::none || stopping) return;
+            if (switching != Switch::none || stop_requested) return;
         } else if (frame.Type != nxFrameType_CAN_BusError && !(frame.Flags & nxFrameFlags_TransmitEcho)) {
             fail(XNET_CO_XNET_ERROR, "unsupported CAN frame type, identifier, or payload ignored");
         }

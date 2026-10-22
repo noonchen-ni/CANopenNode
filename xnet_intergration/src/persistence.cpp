@@ -43,10 +43,10 @@ void write_json_atomic(const std::filesystem::path& path, const Json& value) {
     HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     require(file != INVALID_HANDLE_VALUE, XNET_CO_IO_ERROR, "cannot create " + temporary.string());
     DWORD written = 0;
-    bool ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)
+    bool file_prepared_for_replace = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)
         && written == bytes.size() && FlushFileBuffers(file);
-    bool closed = CloseHandle(file) != 0;
-    if (!ok || !closed || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    bool file_closed = CloseHandle(file) != 0;
+    if (!file_prepared_for_replace || !file_closed || !MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         std::error_code ec; std::filesystem::remove(temporary, ec);
         throw Error(XNET_CO_IO_ERROR, "persistence replacement failed: " + path.string());
     }
@@ -54,16 +54,16 @@ void write_json_atomic(const std::filesystem::path& path, const Json& value) {
     int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     require(fd >= 0, XNET_CO_IO_ERROR, "cannot create " + temporary.string() + ": " + std::strerror(errno));
     size_t offset = 0;
-    bool ok = true;
+    bool file_prepared_for_replace = true;
     while (offset < bytes.size()) {
         const auto written = ::write(fd, bytes.data() + offset, bytes.size() - offset);
         if (written < 0 && errno == EINTR) continue;
-        if (written <= 0) { ok = false; break; }
+        if (written <= 0) { file_prepared_for_replace = false; break; }
         offset += static_cast<size_t>(written);
     }
-    if (ok) ok = ::fsync(fd) == 0;
-    if (::close(fd) != 0) ok = false;
-    if (!ok || ::rename(temporary.c_str(), path.c_str()) != 0) {
+    if (file_prepared_for_replace) file_prepared_for_replace = ::fsync(fd) == 0;
+    if (::close(fd) != 0) file_prepared_for_replace = false;
+    if (!file_prepared_for_replace || ::rename(temporary.c_str(), path.c_str()) != 0) {
         const std::string reason = std::strerror(errno);
         std::error_code ec; std::filesystem::remove(temporary, ec);
         throw Error(XNET_CO_IO_ERROR, "persistence replacement failed: " + path.string() + ": " + reason);
@@ -72,9 +72,9 @@ void write_json_atomic(const std::filesystem::path& path, const Json& value) {
     // Failure here is reported even though replacement may already have become visible.
     int parent = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     require(parent >= 0, XNET_CO_IO_ERROR, "cannot open persistence directory: " + directory.string());
-    const bool synced = ::fsync(parent) == 0;
-    const bool closed = ::close(parent) == 0;
-    require(synced && closed, XNET_CO_IO_ERROR, "cannot synchronize persistence directory: " + directory.string());
+    const bool directory_synced = ::fsync(parent) == 0;
+    const bool directory_closed = ::close(parent) == 0;
+    require(directory_synced && directory_closed, XNET_CO_IO_ERROR, "cannot synchronize persistence directory: " + directory.string());
 #endif
 }
 } // namespace xco

@@ -79,6 +79,8 @@ void xnet_canopen_device::setup_stack() {
     // Extensions point into the old stack allocation; detach them before rebuilding services.
     for (auto& entry : model->entries) entry.extension = nullptr;
     if (co) { CO_delete(co); co = nullptr; }
+    // Also reached by ordinary start/restart: update node-dependent identifiers,
+    // but do not restore OD defaults here, since stop/start preserves device data.
     model->resolve_node(pending_node);
     co = CO_new(&model->config, nullptr);
     require(co != nullptr, XNET_CO_STACK_ERROR, "CANopen stack allocation failed");
@@ -99,9 +101,11 @@ void xnet_canopen_device::setup_stack() {
     stack_ok(result, info, "PDO initialization");
 }
 
-void xnet_canopen_device::reset_stack(bool application) {
+void xnet_canopen_device::reset_stack(bool reset_all_objects) {
     adapter.stop_flush();
-    if (application) {
+    // Reset Node reloads saved/startup LSS settings and restores all OD defaults.
+    // Reset Communication preserves device data and the pending LSS settings.
+    if (reset_all_objects) {
         // The worker is the only reset owner; filesystem reads need no OD lock.
         worker_lock->unlock();
         try { load_persistent(); } catch (...) { worker_lock->lock(); throw; }
@@ -109,7 +113,7 @@ void xnet_canopen_device::reset_stack(bool application) {
         active_bitrate = pending_bitrate;
         adapter.bitrate(active_bitrate);
     }
-    model->restore(application, pending_node);
+    model->restore(reset_all_objects, pending_node);
     setup_stack();
     adapter.start();
     CO_CANsetNormalMode(co->CANmodule);

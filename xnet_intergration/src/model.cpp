@@ -286,18 +286,28 @@ Value& Model::value(uint16_t index, uint8_t sub) {
     throw Error(XNET_CO_NOT_FOUND, where.str());
 }
 
-void Model::restore(bool application, uint8_t node) {
-    // Reset Communication preserves application objects; Reset Node restores both index ranges.
+void Model::restore(bool reset_all_objects, uint8_t node) {
+    // Communication objects (0x1000..0x1FFF) hold CANopen protocol configuration.
+    // "Application objects" are device-specific data, such as simulated I/O and
+    // parameters; this model accepts them from JSON at indices 0x2000..0xBFFF.
+    // Reset Communication (false) restores only communication defaults, preserving
+    // device data. Initialization and Reset Node (true) restore both ranges.
     for (auto& obj : objects) for (auto& v : obj->values) {
-        if (obj->index < 0x2000 || application) std::memcpy(v.data(), v.initial.data(), v.size);
+        if (obj->index < 0x2000 || reset_all_objects) std::memcpy(v.data(), v.initial.data(), v.size);
     }
+    // Defaults contain base COB-IDs; resolve them for the selected node after copying.
     resolve_node(node);
 }
 
 void Model::resolve_node(uint8_t node) {
+    // Keep this separate from restore(): stack rebuilds during start/restart need
+    // node-dependent COB-IDs and collision checks without resetting other OD values.
+    // Only values explicitly marked node_relative are rewritten.
     for (auto& obj : objects) for (auto& v : obj->values) {
         if (v.node_relative) {
             // Rebase from immutable defaults, not the previous node's already-resolved identifier.
+            // This makes repeated resolution idempotent. Node 255 is unconfigured,
+            // so retain the base identifier until LSS assigns a usable node ID.
             uint32_t base; std::memcpy(&base, v.initial.data(), 4);
             base += node == 255 ? 0 : node;
             std::memcpy(v.data(), &base, 4);

@@ -69,15 +69,35 @@ void Adapter::close() {
 } // namespace xco
 
 extern "C" {
+/**
+ * Lock the device's recursive OD/runtime mutex for CANopenNode's CO_LOCK_* hooks.
+ * context is CO_CANmodule_t::CANptr, set to the owning device by CO_CANmodule_init().
+ * Recursion permits stack calls to re-enter the driver while the worker holds it.
+ */
 void xnet_co_lock(void* context) {
     if (context) static_cast<xnet_canopen_device*>(context)->mutex.lock();
 }
+/** Release the mutex acquired by the corresponding CO_LOCK_* hook. */
 void xnet_co_unlock(void* context) {
     if (context) static_cast<xnet_canopen_device*>(context)->mutex.unlock();
 }
+/**
+ * Configuration-mode hook required by CANopenNode; no hardware action here.
+ * The device lifecycle explicitly stops/flushes XNET sessions before stack resets.
+ */
 void CO_CANsetConfigurationMode(void*) {}
+/** Mark the stack ready for normal CAN operation; XNET sessions are started separately. */
 void CO_CANsetNormalMode(CO_CANmodule_t* module) { if (module) module->CANnormal = true; }
 
+/**
+ * Attach a newly allocated stack CAN module to its device and initialize its buffers.
+ * context is the owning xnet_canopen_device; rx/tx are stack-owned arrays with
+ * nr/nt slots. The driver borrows these arrays for the lifetime of this stack.
+ * bitrate is in kbit/s and is validated here, but XNET session setup applies it.
+ * Clear subscriptions, transmit state, and error flags; remain outside normal mode
+ * until CO_CANsetNormalMode(). No session creation or frame I/O occurs here.
+ * Returns CO_ERROR_ILLEGAL_ARGUMENT for invalid inputs, otherwise CO_ERROR_NO.
+ */
 CO_ReturnError_t CO_CANmodule_init(CO_CANmodule_t* m, void* context, CO_CANrx_t rx[], uint16_t nr,
                                   CO_CANtx_t tx[], uint16_t nt, uint16_t bitrate) {
     if (!m || !context || !rx || !tx || !xco::valid_bitrate(bitrate)) return CO_ERROR_ILLEGAL_ARGUMENT;
@@ -86,21 +106,54 @@ CO_ReturnError_t CO_CANmodule_init(CO_CANmodule_t* m, void* context, CO_CANrx_t 
     std::memset(rx, 0, nr * sizeof(*rx)); std::memset(tx, 0, nt * sizeof(*tx));
     return CO_ERROR_NO;
 }
+/**
+ * Mark the module inactive when CANopenNode disables/deletes it.
+ * Session shutdown belongs to the device lifecycle, not to the stack allocation:
+ * the same XNET sessions can be retained while rebuilding CANopenNode services.
+ */
 void CO_CANmodule_disable(CO_CANmodule_t* m) { if (m) m->CANnormal = false; }
 
+/**
+ * Install one software receive filter and its protocol callback in a stack slot.
+ * ident is the expected standard CAN ID; mask selects which ID bits must match.
+ * A mask bit of 1 means "compare this bit"; 0 means "accept either value".
+ * rtr selects remote frames (true) or data frames (false); it is always compared.
+ * object is passed unchanged as the callback's first argument when receive()
+ * dispatches a matching frame. These are software filters, not XNET filters.
+ */
 CO_ReturnError_t CO_CANrxBufferInit(CO_CANmodule_t* m, uint16_t index, uint16_t ident, uint16_t mask,
                                    bool_t rtr, void* object, void (*callback)(void*, void*)) {
     if (!m || index >= m->rxSize || !object || !callback) return CO_ERROR_ILLEGAL_ARGUMENT;
+    // Internal packed identifier: bits 0..10 = standard CAN ID (0x7ff),
+    // bit 11 = remote-transmission-request flag (0x800), not an extra CAN ID bit.
+    // Strip higher caller bits, then encode the expected RTR value in ident.
+    // Force bit 11 into the mask so data and remote frames never match each other,
+    // even when the caller's ID mask is 0 (accept every ID of the requested type).
     m->rxArray[index] = {static_cast<uint16_t>((ident & 0x7ff) | (rtr ? 0x800 : 0)),
         static_cast<uint16_t>((mask & 0x7ff) | 0x800), object, callback};
     return CO_ERROR_NO;
 }
+/**
+ * Configure and return one stack-owned transmit slot, or nullptr for invalid input.
+ * ident is an 11-bit CAN ID, length is 0..8 bytes, and rtr selects a remote frame.
+ * sync marks synchronous PDO traffic that may need cancellation outside its
+ * allowed SYNC window. The caller fills data before calling CO_CANsend().
+ */
 CO_CANtx_t* CO_CANtxBufferInit(CO_CANmodule_t* m, uint16_t index, uint16_t ident, bool_t rtr, uint8_t length, bool_t sync) {
     if (!m || index >= m->txSize || ident > 0x7ff || length > 8) return nullptr;
     auto& b = m->txArray[index];
+    // Use the same packed ID/RTR representation as receive filters; XNET expects
+    // the ID and frame type separately, so transmit() splits them again.
     b.ident = ident | (rtr ? 0x800U : 0U); b.DLC = length; b.syncFlag = sync; b.bufferFull = false;
     return &b;
 }
+/**
+ * Queue an immutable frame copy for the worker; success means queued, not sent.
+ * bufferFull reserves the originating stack slot until transmission/cancellation.
+ * A second send on an occupied slot reports overflow rather than replacing data.
+ * The queue borrows the slot pointer, so it must be drained/discarded before the
+ * stack is freed. Actual nonblocking XNET writes are performed by transmit().
+ */
 CO_ReturnError_t CO_CANsend(CO_CANmodule_t* m, CO_CANtx_t* b) {
     if (!m || !m->CANptr || !b) return CO_ERROR_ILLEGAL_ARGUMENT;
     auto& d = *static_cast<xnet_canopen_device*>(m->CANptr);
@@ -125,6 +178,11 @@ CO_ReturnError_t CO_CANsend(CO_CANmodule_t* m, CO_CANtx_t* b) {
         return CO_ERROR_OUT_OF_MEMORY;
     }
 }
+/**
+ * Cancel queued synchronous PDOs when CANopenNode closes the valid SYNC window.
+ * Leave asynchronous traffic intact. Frames already accepted by XNET cannot be
+ * recalled here; only copies still in the driver's outgoing queue are removed.
+ */
 void CO_CANclearPendingSyncPDOs(CO_CANmodule_t* m) {
     auto& d = *static_cast<xnet_canopen_device*>(m->CANptr);
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
@@ -138,13 +196,22 @@ void CO_CANclearPendingSyncPDOs(CO_CANmodule_t* m) {
         } else ++it;
     }
 }
+/**
+ * Poll XNET controller state for CANopenNode's periodic error processing.
+ * Map TX/RX error counters to warning/passive flags and detect bus-off. Queue-loss
+ * flags remain latched until module reset; physical-state flags are recomputed
+ * so recovery can clear them. An XNET query failure marks the device FAILED and
+ * requests worker shutdown instead of propagating an exception into the C stack.
+ */
 void CO_CANmodule_process(CO_CANmodule_t* m) {
     auto& d = *static_cast<xnet_canopen_device*>(m->CANptr);
     u32 state = 0; nxStatus_t fault = 0;
     try {
         d.adapter.check(nxReadState(d.adapter.input, nxState_CANComm, sizeof(state), &state, &fault), "read CAN state");
         d.adapter.check(fault, "CAN state fault");
-        // Retain loss indicators until reset, but recompute physical bus state from current counters.
+        // AND keeps only these historical loss bits and clears old warning,
+        // passive, and bus-off bits. Each following OR adds a currently active
+        // condition without erasing the other flags (these are bit flags, not codes).
         uint16_t flags = m->CANerrorStatus & (CO_CAN_ERRTX_OVERFLOW | CO_CAN_ERRRX_OVERFLOW | CO_CAN_ERRTX_PDO_LATE);
         auto tx = nxCANComm_Get_TxErrCount(state), rx = nxCANComm_Get_RxErrCount(state);
         if (tx >= 96) flags |= CO_CAN_ERRTX_WARNING;
@@ -167,6 +234,8 @@ void xnet_canopen_device::transmit() {
     while (!outgoing.empty()) {
         const auto& pending = outgoing.front();
         nxFrameCAN_t frame{};
+        // Remove our internal RTR bit from the on-wire ID; translate it into
+        // XNET's separate frame type instead. Only the low 11 ID bits are sent.
         frame.Identifier = pending.frame.ident & 0x7ff;
         frame.Type = (pending.frame.ident & 0x800) ? nxFrameType_CAN_Remote : nxFrameType_CAN_Data;
         frame.PayloadLength = pending.frame.DLC;
@@ -208,12 +277,18 @@ void xnet_canopen_device::receive() {
         if ((frame.Type == nxFrameType_CAN_Data || frame.Type == nxFrameType_CAN20_Data || frame.Type == nxFrameType_CAN_Remote)
             && frame.Identifier <= 0x7ff && frame.PayloadLength <= 8 && !(frame.Flags & nxFrameFlags_TransmitEcho)) {
             CO_CANrxMsg_t message{};
+            // Pack XNET's separate ID/type into the representation registered by
+            // CO_CANrxBufferInit(): low 11 bits are the ID, bit 11 marks RTR.
             message.ident = static_cast<uint16_t>(frame.Identifier | (frame.Type == nxFrameType_CAN_Remote ? 0x800 : 0));
             message.DLC = frame.PayloadLength;
             // Some stack callbacks copy all eight bytes; keep bytes beyond the actual payload zeroed.
             if (frame.Type != nxFrameType_CAN_Remote) std::memcpy(message.data, raw + offset + nxSizeofFrameHeader, message.DLC);
             for (uint16_t i = 0; i < co->CANmodule->rxSize; ++i) {
                 auto& subscription = co->CANmodule->rxArray[i];
+                // XOR marks differing ID/RTR bits; AND discards differences in
+                // "don't care" positions. Zero means every selected bit matches.
+                // Example: ident=0x180, mask=0x780 accepts IDs 0x180..0x1ff;
+                // the additional 0x800 mask bit still enforces the requested RTR.
                 if (subscription.CANrx_callback && ((message.ident ^ subscription.ident) & subscription.mask) == 0) {
                     subscription.CANrx_callback(subscription.object, &message);
                     break;

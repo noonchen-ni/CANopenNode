@@ -37,6 +37,11 @@ typedef uint_fast8_t bool_t;
 typedef float float32_t;
 typedef double float64_t;
 
+/*
+ * Driver-internal frame layout, not the NI-XNET frame layout: ident bits 0..10
+ * contain a standard CAN ID; bit 11 (0x800) marks a remote frame (RTR).
+ * Extended IDs and CAN FD are not supported by this port.
+ */
 typedef struct {
     uint16_t ident;
     uint8_t DLC;
@@ -48,7 +53,7 @@ typedef struct {
 
 typedef struct {
     uint16_t ident;
-    uint16_t mask;
+    uint16_t mask; /* Compare bits set to 1; includes bit 11 to always compare RTR. */
     void* object;
     void (*CANrx_callback)(void* object, void* message);
 } CO_CANrx_t;

@@ -119,6 +119,12 @@ void xnet_canopen_device::reset_stack(bool reset_all_objects) {
     CO_CANsetNormalMode(co->CANmodule);
 }
 
+/**
+ * LSS validation callback: context is this device and rate is in kbit/s.
+ * Accept only supported fixed rates; this does not apply the rate to XNET.
+ * False rejects the LSS request and records a diagnostic, including for automatic
+ * bitrate detection, which this port does not implement.
+ */
 bool_t xnet_canopen_device::check_bitrate(void* context, uint16_t rate) {
     auto& d = *static_cast<xnet_canopen_device*>(context);
     if (xco::valid_bitrate(rate)) return true;
@@ -126,6 +132,12 @@ bool_t xnet_canopen_device::check_bitrate(void* context, uint16_t rate) {
     return false;
 }
 
+/**
+ * LSS activation callback, invoked by the worker while holding the OD mutex.
+ * delay is the silence interval in milliseconds on each side of the bitrate change.
+ * Stop/flush immediately; run() later changes to pending_bitrate and restarts
+ * sessions after the second interval, without blocking this callback for the delay.
+ */
 void xnet_canopen_device::activate_bitrate(void* context, uint16_t delay) {
     auto& d = *static_cast<xnet_canopen_device*>(context);
     d.switch_delay_ms = delay;
@@ -141,6 +153,13 @@ void xnet_canopen_device::activate_bitrate(void* context, uint16_t delay) {
     }
 }
 
+/**
+ * LSS Store Configuration callback: save the supplied node ID and kbit/s rate
+ * with this device's identity. Runs on the worker and temporarily releases its
+ * OD lock during disk I/O; lifecycle teardown joins the worker before freeing it.
+ * Return true only when atomic storage completes, so LSS can acknowledge success;
+ * storage exceptions record a diagnostic and return false for an LSS error reply.
+ */
 bool_t xnet_canopen_device::store(void* context, uint8_t node, uint16_t bitrate) {
     auto& d = *static_cast<xnet_canopen_device*>(context);
     const auto saved = xco::Json{{"schema_version", 1}, {"identity", d.model->identity},

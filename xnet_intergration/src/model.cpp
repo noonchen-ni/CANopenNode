@@ -13,8 +13,7 @@ void require(bool condition, int32_t code, const std::string& message) {
 }
 
 bool valid_bitrate(uint16_t rate) {
-    return rate == 10 || rate == 20 || rate == 50 || rate == 125 || rate == 250
-        || rate == 500 || rate == 800 || rate == 1000;
+    return rate >= 1 && rate <= 1000;
 }
 
 uint64_t unsigned_number(const Json& j, uint64_t maximum, const std::string& where) {
@@ -132,7 +131,7 @@ void Model::load(const Json& root) {
     startup_node = static_cast<uint8_t>(unsigned_number(root.at("node_id"), 255, "node_id"));
     require((startup_node >= 1 && startup_node <= 127) || startup_node == 255, XNET_CO_MODEL_ERROR, "invalid node_id");
     startup_bitrate = static_cast<uint16_t>(unsigned_number(root.at("bitrate_kbps"), 1000, "bitrate_kbps"));
-    require(valid_bitrate(startup_bitrate), XNET_CO_MODEL_ERROR, "unsupported bitrate");
+    require(valid_bitrate(startup_bitrate), XNET_CO_MODEL_ERROR, "bitrate_kbps must be 1..1000");
     worker_period_us = static_cast<uint32_t>(unsigned_number(root.value("worker_period_us", Json(1000)), 100000, "worker_period_us"));
     require(worker_period_us >= 100, XNET_CO_MODEL_ERROR, "worker_period_us must be 100..100000");
     const auto& id = root.at("identity");

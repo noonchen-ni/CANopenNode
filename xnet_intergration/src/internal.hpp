@@ -32,6 +32,7 @@ struct Error : std::runtime_error {
     Error(int32_t c, const std::string& text) : std::runtime_error(text), code(c) {}
 };
 void require(bool condition, int32_t code, const std::string& message);
+/** Numeric range for configured Classical CAN rates in kbit/s; XNET checks hardware support. */
 bool valid_bitrate(uint16_t kbps);
 uint64_t unsigned_number(const Json& value, uint64_t maximum, const std::string& where);
 Json read_json(const std::filesystem::path& path);

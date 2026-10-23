@@ -109,7 +109,7 @@ Required root fields:
 | --- | --- |
 | `schema_version` | Integer `1` |
 | `node_id` | `1..127`, or `255` for LSS commissioning |
-| `bitrate_kbps` | `10, 20, 50, 125, 250, 500, 800, 1000` |
+| `bitrate_kbps` | Whole-number startup bitrate from `1` to `1000` kbit/s; must be supported by the target XNET interface |
 | `identity` | `vendor_id`, `product_code`, `revision_number`, `serial_number`, each uint32 |
 | `objects` | Array of application VAR/ARRAY/RECORD descriptions |
 
@@ -278,8 +278,11 @@ XNET nonzero statuses, including warnings, are conservatively surfaced as errors
 The existing LSS slave supplies global/selective selection, fastscan, identity
 and node-ID inquiries, node-ID configuration, bitrate configuration/activation,
 and Store Configuration. The wrapper implements adapter and storage callbacks.
-All standard fixed rates listed above are offered; hardware-specific support
-must be validated on the target. Automatic bitrate detection (table index 9)
+LSS uses the standard fixed-rate table: `10, 20, 50, 125, 250, 500, 800, 1000`
+kbit/s. Startup JSON and saved configuration also accept other whole-number
+rates within `1..1000` kbit/s; they are not restricted to the LSS table.
+XNET reports unsupported hardware settings when the rate is applied.
+Automatic bitrate detection (table index 9, passed to the callback as rate `0`)
 is rejected explicitly because no detection implementation is provided.
 
 Activation stops/flushes sessions immediately, waits the requested delay,

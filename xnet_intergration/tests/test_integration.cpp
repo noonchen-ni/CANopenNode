@@ -118,7 +118,40 @@ void model_validation() {
     bad = j; bad["tpdos"][0]["mapping"].push_back({{"index", "0x2001"}}); CHECK(rejects(bad));
     bad = j; bad["objects"][3]["value"] = std::string(32, 'x'); CHECK(rejects(bad));
     bad = j; bad["node_id"] = 128; CHECK(rejects(bad));
+    for (const auto& rate : {xco::Json(0), xco::Json(-1), xco::Json(1001), xco::Json(125.5), xco::Json("invalid")}) {
+        bad = j; bad["bitrate_kbps"] = rate; CHECK(rejects(bad));
+    }
     bad = j; bad["unexpected"] = true; CHECK(rejects(bad));
+}
+
+void startup_bitrates() {
+    Fixture f;
+    auto j = xco::read_json(f.model_path);
+    for (uint16_t rate : {1, 100, 123, 1000}) {
+        j["bitrate_kbps"] = rate; f.model(j);
+        CHECK(f.initialize() == 0);
+        const auto status = f.status();
+        CHECK(status.active_bitrate_kbps == rate && status.pending_bitrate_kbps == rate);
+        const auto events = fake::events();
+        CHECK(!events.empty() && events.back().operation == "bitrate" && events.back().value == uint64_t(rate) * 1000);
+        CHECK(xnet_canopen_uninitialize(f.device) == 0 && fake::sessions() == 0);
+    }
+    j["bitrate_kbps"] = 123; f.model(j);
+    CHECK(f.initialize() == 0); f.start();
+    fake::inject(0x7e5, {4, 1, 0, 0, 0, 0, 0, 0});
+    auto answer = exchange(0x7e5, {0x13, 0, 9, 0, 0, 0, 0, 0}, 0x7e4, 0x13);
+    CHECK(answer.Payload[1] != 0 && f.status().pending_bitrate_kbps == 123);
+    answer = exchange(0x7e5, {0x17, 0, 0, 0, 0, 0, 0, 0}, 0x7e4, 0x17);
+    CHECK(answer.Payload[1] == 0);
+    CHECK(xco::read_json(f.saved_path).at("bitrate_kbps") == 123);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    j["bitrate_kbps"] = 250; f.model(j);
+    CHECK(f.initialize() == 0);
+    CHECK(f.status().active_bitrate_kbps == 123 && f.status().pending_bitrate_kbps == 123);
+    f.start();
+    exchange(0, {0x81, 10}, 0x70a, 0);
+    CHECK(f.status().runtime_state == XNET_CO_RUNTIME_RUNNING);
+    CHECK(f.status().active_bitrate_kbps == 123 && f.status().pending_bitrate_kbps == 123);
 }
 
 void scalar_limits() {
@@ -393,7 +426,7 @@ void storage_failures() {
         bad = valid; bad["node_id"] = node;
         xco::write_json_atomic(f.saved_path, bad); check_fallback();
     }
-    for (const auto& rate : {xco::Json(123), xco::Json(1001), xco::Json("invalid")}) {
+    for (const auto& rate : {xco::Json(0), xco::Json(-1), xco::Json(1001), xco::Json(125.5), xco::Json("invalid")}) {
         bad = valid; bad["bitrate_kbps"] = rate;
         xco::write_json_atomic(f.saved_path, bad); check_fallback();
     }
@@ -536,7 +569,7 @@ void persistence_atomicity() {
 int main() {
     if (!xnet_canopen_c_header_test()) return 1;
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
-        {"model validation", model_validation}, {"scalar limits", scalar_limits},
+        {"model validation", model_validation}, {"startup bitrates", startup_bitrates}, {"scalar limits", scalar_limits},
         {"batches and lifecycle", batches_and_lifecycle}, {"partial writes and strings", partial_and_strings},
         {"packed batch buffers", packed_batches}, {"batch argument validation and limits", batch_validation},
         {"SDO PDO EMCY NMT", protocol_basics}, {"LSS assignment and resets", lss_assignment_and_resets},

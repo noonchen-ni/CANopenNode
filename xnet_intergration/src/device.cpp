@@ -121,9 +121,11 @@ void xnet_canopen_device::reset_stack(bool reset_all_objects) {
 
 /**
  * LSS validation callback: context is this device and rate is in kbit/s.
- * Accept only supported fixed rates; this does not apply the rate to XNET.
- * False rejects the LSS request and records a diagnostic, including for automatic
- * bitrate detection, which this port does not implement.
+ * CANopenNode validates the standard table selector/index before calling this
+ * function with its numerical rate. Fixed entries are accepted within 1..1000;
+ * hardware support is checked when XNET applies the rate, not by this callback.
+ * Index 9 arrives as rate 0, which is rejected because automatic detection is
+ * not implemented. Startup JSON is not restricted to the LSS table's fixed rates.
  */
 bool_t xnet_canopen_device::check_bitrate(void* context, uint16_t rate) {
     auto& d = *static_cast<xnet_canopen_device*>(context);

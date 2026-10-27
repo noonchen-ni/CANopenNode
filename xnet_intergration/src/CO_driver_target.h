@@ -1,18 +1,32 @@
 #ifndef CO_DRIVER_TARGET_H
 #define CO_DRIVER_TARGET_H
 
+/*
+ * CANopenNode port configuration shared by the C stack and C++ integration.
+ * CO_MULTIPLE_OD gives each handle its own service allocation and generated OD;
+ * dictionary structure remains fixed for the duration of one initialization.
+ */
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
 #define CO_MULTIPLE_OD
 #define CO_CONFIG_NMT 0
+/* This port simulates a slave: peer-heartbeat consumption and guarding master
+ * operation are not enabled. The stack disables guarding slave processing while
+ * its heartbeat producer is active, so the two supervision methods do not race.
+ */
 #define CO_CONFIG_HB_CONS 0
-#define CO_CONFIG_NODE_GUARDING 0
-#define CO_CONFIG_EM (CO_CONFIG_EM_PRODUCER | CO_CONFIG_EM_HISTORY | CO_CONFIG_EM_PROD_INHIBIT)
+#define CO_CONFIG_NODE_GUARDING CO_CONFIG_NODE_GUARDING_SLAVE_ENABLE
+#define CO_CONFIG_EM (CO_CONFIG_EM_PRODUCER | CO_CONFIG_EM_HISTORY | CO_CONFIG_EM_PROD_INHIBIT \
+    | CO_CONFIG_EM_PROD_CONFIGURABLE)
 #define CO_CONFIG_SDO_SRV CO_CONFIG_SDO_SRV_SEGMENTED
 #define CO_CONFIG_SDO_CLI 0
-#define CO_CONFIG_SYNC CO_CONFIG_SYNC_ENABLE
+/* Dynamic OD handling is selected per service. SYNC needs its live COB-ID
+ * callback, but enabling that flag globally would also change unrelated services.
+ * In particular, PDO mapping/configuration stays fixed and SDO-read-only.
+ */
+#define CO_CONFIG_SYNC (CO_CONFIG_SYNC_ENABLE | CO_CONFIG_FLAG_OD_DYNAMIC)
 #define CO_CONFIG_PDO (CO_CONFIG_RPDO_ENABLE | CO_CONFIG_TPDO_ENABLE | CO_CONFIG_RPDO_TIMERS_ENABLE \
     | CO_CONFIG_TPDO_TIMERS_ENABLE | CO_CONFIG_PDO_SYNC_ENABLE | CO_CONFIG_PDO_OD_IO_ACCESS)
 #define CO_CONFIG_TIME 0
@@ -25,6 +39,9 @@
 #define CO_CONFIG_TRACE 0
 #define CO_CONFIG_GLOBAL_FLAG_OD_DYNAMIC 0
 
+/* Scalar storage and batch buffers share little-endian numeric bytes. Reject
+ * other targets instead of silently publishing host-order bytes on CAN.
+ */
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error The XNET integration currently supports little-endian targets only
 #endif

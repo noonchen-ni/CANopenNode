@@ -2,6 +2,7 @@
 #include <stddef.h>
 
 typedef char status_size_must_be_32[(sizeof(xnet_canopen_status_t) == 32) ? 1 : -1];
+typedef char guarding_status_offset_must_be_28[(offsetof(xnet_canopen_status_t, node_guarding_timeout) == 28) ? 1 : -1];
 typedef char runtime_values_must_be_stable[
     (XNET_CO_RUNTIME_UNINITIALIZED == 0 && XNET_CO_RUNTIME_STOPPED == 1
      && XNET_CO_RUNTIME_RUNNING == 2 && XNET_CO_RUNTIME_FAILED == 3) ? 1 : -1];

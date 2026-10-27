@@ -1,3 +1,10 @@
+/**
+ * @file
+ * NI-XNET session adapter and CANopenNode's target-driver boundary.
+ * CANopenNode queues immutable transmit copies; only the device worker performs
+ * frame I/O. Received raw-stream records are translated into standard CAN/RTR
+ * messages and dispatched through stack-owned software subscriptions.
+ */
 #include "internal.hpp"
 
 #include <algorithm>
@@ -5,12 +12,20 @@
 
 namespace xco {
 void Adapter::check(nxStatus_t status, const char* operation) {
+    // Treat warnings as observable failures too; do not assume partially
+    // successful NI calls have left a usable session/frame transaction.
     if (status == nxSuccess) return;
     char message[2048]{};
     nxStatusToString(status, sizeof(message), message);
     throw Error(XNET_CO_XNET_ERROR, std::string(operation) + " (" + std::to_string(status) + "): " + message);
 }
 
+/**
+ * Open raw frame streams on the same physical interface, without a CAN database.
+ * Keep auto-start off so initialize can provision resources without bus traffic.
+ * Partial session acquisition is retained in this object for release() to clean
+ * up or retry; this method does not hide an error by discarding a live reference.
+ */
 void Adapter::open(const std::string& name, uint16_t kbps) {
     check(nxCreateSession(":memory:", "", "", name.c_str(), nxMode_FrameInStream, &input), "create input");
     check(nxCreateSession(":memory:", "", "", name.c_str(), nxMode_FrameOutStream, &output), "create output");
@@ -28,6 +43,8 @@ void Adapter::open(const std::string& name, uint16_t kbps) {
 }
 
 void Adapter::bitrate(uint16_t kbps) {
+    // Bitrate is interface-wide although XNET exposes the property via a session.
+    // Use NI's 64-bit bits/second property, not the public API's kbit/s unit.
     u64 rate = uint64_t(kbps) * 1000;
     check(nxSetProperty(input, nxPropSession_IntfBaudRate64, sizeof(rate), &rate), "set bitrate");
 }
@@ -230,6 +247,12 @@ void CO_CANmodule_process(CO_CANmodule_t* m) {
 }
 } // extern "C"
 
+/**
+ * Submit pending snapshots in FIFO order while holding the runtime mutex.
+ * XNET queue-full is backpressure: retain the front frame and its busy stack slot
+ * for a later iteration. Other NI failures propagate to the worker's failure
+ * handler; accepting a frame here is not an on-wire delivery acknowledgment.
+ */
 void xnet_canopen_device::transmit() {
     while (!outgoing.empty()) {
         const auto& pending = outgoing.front();
@@ -253,6 +276,12 @@ void xnet_canopen_device::transmit() {
     }
 }
 
+/**
+ * Process at most one nonblocking 8 KiB stream read per worker iteration.
+ * Validate record boundaries before reading payloads and keep RTR/data filtering
+ * distinct. On input overflow, flush unread traffic and expose the loss instead
+ * of presenting the remaining OD values as a lossless command stream.
+ */
 void xnet_canopen_device::receive() {
     std::array<uint64_t, 1024> storage{};
     u32 bytes = 0;
@@ -294,7 +323,9 @@ void xnet_canopen_device::receive() {
                     break;
                 }
             }
-            // Drain single-message mailboxes before the next frame; the outer loop advances timers once.
+            // Drain general-protocol mailboxes (including SDO/NMT) before the next
+            // frame, without advancing timers again. RPDO application/SYNC remain
+            // in the outer loop, so this is not a lossless RPDO command queue.
             auto reset = CO_process(co, false, 0, nullptr);
             if (reset != CO_RESET_NOT) { reset_stack(reset == CO_RESET_APP); return; }
             if (switching != Switch::none || stop_requested) return;

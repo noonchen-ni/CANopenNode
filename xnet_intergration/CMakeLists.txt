@@ -11,6 +11,7 @@ set(STACK_SOURCES
     "${STACK_ROOT}/CANopen.c"
     "${STACK_ROOT}/301/CO_ODinterface.c"
     "${STACK_ROOT}/301/CO_NMT_Heartbeat.c"
+    "${STACK_ROOT}/301/CO_Node_Guarding.c"
     "${STACK_ROOT}/301/CO_Emergency.c"
     "${STACK_ROOT}/301/CO_SDOserver.c"
     "${STACK_ROOT}/301/CO_SYNC.c"

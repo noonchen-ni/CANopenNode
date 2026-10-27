@@ -94,6 +94,38 @@ void operational(Fixture& f) {
     wait_for([&] { return f.status().nmt_state == CO_NMT_OPERATIONAL; });
 }
 
+nxFrameCAN_t sdo_download(uint16_t index, uint8_t subindex, uint32_t value, uint8_t size) {
+    return exchange(0x60a, {static_cast<uint8_t>(0x23 | ((4 - size) << 2)),
+        static_cast<uint8_t>(index), static_cast<uint8_t>(index >> 8), subindex,
+        static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8),
+        static_cast<uint8_t>(value >> 16), static_cast<uint8_t>(value >> 24)}, 0x58a);
+}
+
+uint32_t sdo_upload(uint16_t index) {
+    const auto response = exchange(0x60a, {0x40, static_cast<uint8_t>(index),
+        static_cast<uint8_t>(index >> 8), 0, 0, 0, 0, 0}, 0x58a);
+    CHECK(response.Payload[0] == 0x43 || response.Payload[0] == 0x4b || response.Payload[0] == 0x4f);
+    const auto size = 4U - ((response.Payload[0] >> 2) & 3U);
+    uint32_t value = 0;
+    for (uint32_t i = 0; i < size; ++i) value |= uint32_t(response.Payload[4 + i]) << (8 * i);
+    return value;
+}
+
+nxFrameCAN_t guarding_request() {
+    fake::clear_transmitted();
+    fake::inject(0x70a, {}, nxFrameType_CAN_Remote);
+    nxFrameCAN_t response{};
+    wait_for([&] {
+        for (const auto& frame : fake::transmitted()) if (frame.Identifier == 0x70a) {
+            response = frame;
+            return true;
+        }
+        return false;
+    });
+    CHECK(response.PayloadLength == 1 && response.Type == nxFrameType_CAN_Data);
+    return response;
+}
+
 void model_validation() {
     auto j = xco::read_json(XNET_CO_EXAMPLE_MODEL);
     xco::Model m; m.load(j);
@@ -122,6 +154,23 @@ void model_validation() {
         bad = j; bad["bitrate_kbps"] = rate; CHECK(rejects(bad));
     }
     bad = j; bad["unexpected"] = true; CHECK(rejects(bad));
+    auto maximum_life_time = j;
+    maximum_life_time["node_guarding"] = {{"guard_time_ms", 65535}, {"life_time_factor", 65}};
+    xco::Model maximum_life_time_model; maximum_life_time_model.load(maximum_life_time);
+    bad = maximum_life_time; bad["node_guarding"]["life_time_factor"] = 66; CHECK(rejects(bad));
+    bad = j; bad["node_guarding"] = {{"guard_time_ms", 65535}, {"life_time_factor", 255}}; CHECK(rejects(bad));
+    bad = j; bad["node_guarding"] = {{"guard_time_ms", -1}}; CHECK(rejects(bad));
+    bad = j; bad["node_guarding"] = {{"life_time_factor", 256}}; CHECK(rejects(bad));
+    bad = j; bad["node_guarding"] = {{"unknown", 1}}; CHECK(rejects(bad));
+    bad = j; bad["sync"] = {{"cob_id", 0x701}}; CHECK(rejects(bad));
+    bad = j; bad["sync"] = {{"cob_id", 0x40000080}}; CHECK(rejects(bad));
+    bad = j; bad["sync"] = {{"period_us", -1}}; CHECK(rejects(bad));
+    bad = j; bad["sync"] = {{"window_us", 0x100000000ULL}}; CHECK(rejects(bad));
+    bad = j; bad["sync"] = {{"counter_overflow", 1}}; CHECK(rejects(bad));
+    bad = j; bad["sync"] = {{"counter_overflow", 241}}; CHECK(rejects(bad));
+    bad = j; bad["emcy"] = {{"cob_id", 0x40000090}}; CHECK(rejects(bad));
+    bad = j; bad["emcy"] = {{"cob_id", 0x80}}; CHECK(rejects(bad));
+    bad = j; bad["emcy"] = {{"inhibit_100us", 65536}}; CHECK(rejects(bad));
 }
 
 void startup_bitrates() {
@@ -549,6 +598,169 @@ void synchronous_requests() {
     CHECK(xnet_canopen_request_tpdo(f.device, 1) == XNET_CO_INVALID_STATE);
 }
 
+void node_guarding() {
+    Fixture f;
+    auto j = xco::read_json(f.model_path);
+    j["heartbeat_ms"] = 0;
+    j["node_guarding"] = {{"guard_time_ms", 100}, {"life_time_factor", 3}};
+    f.model(j); CHECK(f.initialize() == 0); f.start();
+    CHECK(sdo_upload(0x100c) == 100 && sdo_upload(0x100d) == 3 && sdo_upload(0x100e) == 0x70a);
+    fake::clear_transmitted();
+    fake::inject(0x70a, {0});
+    std::this_thread::sleep_for(15ms);
+    for (const auto& frame : fake::transmitted()) CHECK(frame.Identifier != 0x70a);
+    CHECK(guarding_request().Payload[0] == CO_NMT_PRE_OPERATIONAL);
+    CHECK(guarding_request().Payload[0] == (CO_NMT_PRE_OPERATIONAL | 0x80));
+    operational(f);
+    CHECK(guarding_request().Payload[0] == CO_NMT_OPERATIONAL);
+    wait_for([&] { return f.status().node_guarding_timeout == 1; });
+    wait_for([] {
+        for (const auto& frame : fake::transmitted())
+            if (frame.Identifier == 0x8a && frame.Payload[0] == 0x30 && frame.Payload[1] == 0x81) return true;
+        return false;
+    });
+    wait_for([&] { return f.status().nmt_state == CO_NMT_PRE_OPERATIONAL; });
+    guarding_request();
+    CHECK(f.status().node_guarding_timeout == 0);
+    CHECK(sdo_download(0x100c, 0, 65535, 2).Payload[0] == 0x60);
+    CHECK(sdo_download(0x100d, 0, 255, 1).Payload[0] == 0x80);
+    CHECK(sdo_upload(0x100d) == 3);
+    CHECK(sdo_download(0x100c, 0, 60, 2).Payload[0] == 0x60);
+    CHECK(sdo_download(0x100d, 0, 4, 1).Payload[0] == 0x60);
+    CHECK(xnet_canopen_stop(f.device) == 0);
+    f.start();
+    CHECK(f.status().node_guarding_timeout == 0);
+    CHECK(sdo_upload(0x100c) == 60 && sdo_upload(0x100d) == 4);
+    CHECK(guarding_request().Payload[0] == CO_NMT_PRE_OPERATIONAL);
+    exchange(0, {0x82, 10}, 0x70a, 0);
+    CHECK(sdo_upload(0x100c) == 100 && sdo_upload(0x100d) == 3);
+    CHECK(f.status().node_guarding_timeout == 0);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    CHECK(f.status().node_guarding_timeout == 0);
+}
+
+void supervision_switching() {
+    Fixture f;
+    auto j = xco::read_json(f.model_path);
+    j["node_guarding"] = {{"guard_time_ms", 20}, {"life_time_factor", 1}};
+    f.model(j); CHECK(f.initialize() == 0); f.start();
+    fake::clear_transmitted();
+    fake::inject(0x70a, {}, nxFrameType_CAN_Remote);
+    std::this_thread::sleep_for(40ms);
+    CHECK(f.status().node_guarding_timeout == 0);
+    for (const auto& frame : fake::transmitted()) CHECK(frame.Identifier != 0x70a);
+    CHECK(sdo_download(0x1017, 0, 0, 2).Payload[0] == 0x60);
+    guarding_request();
+    wait_for([&] { return f.status().node_guarding_timeout == 1; });
+    CHECK(sdo_download(0x1017, 0, 50, 2).Payload[0] == 0x60);
+    CHECK(f.status().node_guarding_timeout == 0);
+    wait_for([] {
+        for (const auto& frame : fake::transmitted()) if (frame.Identifier == 0x70a) return true;
+        return false;
+    });
+    CHECK(sdo_download(0x1017, 0, 0, 2).Payload[0] == 0x60);
+    CHECK(sdo_download(0x100d, 0, 0, 1).Payload[0] == 0x60);
+    CHECK((guarding_request().Payload[0] & 0x7f) == CO_NMT_PRE_OPERATIONAL);
+    std::this_thread::sleep_for(40ms);
+    CHECK(f.status().node_guarding_timeout == 0);
+    CHECK(sdo_download(0x100d, 0, 1, 1).Payload[0] == 0x60);
+    guarding_request();
+    wait_for([&] { return f.status().node_guarding_timeout == 1; });
+    CHECK(sdo_download(0x100c, 0, 0, 2).Payload[0] == 0x60);
+    CHECK(f.status().node_guarding_timeout == 0);
+}
+
+void configurable_services() {
+    Fixture f;
+    auto j = xco::read_json(f.model_path);
+    j["sync"] = {{"cob_id", "0x90"}};
+    j["emcy"] = {{"cob_id", "0xa0"}, {"inhibit_100us", 10}};
+    j["tpdos"][0]["transmission_type"] = 0;
+    f.model(j); CHECK(f.initialize() == 0); f.start(); operational(f);
+    CHECK(sdo_upload(0x1005) == 0x90 && sdo_upload(0x1014) == 0xa0 && sdo_upload(0x1015) == 10);
+    auto check_sync = [&](uint16_t old_id, uint16_t new_id) {
+        fake::clear_transmitted();
+        CHECK(xnet_canopen_request_tpdo(f.device, 1) == 0);
+        fake::inject(old_id, {});
+        std::this_thread::sleep_for(15ms);
+        for (const auto& frame : fake::transmitted()) CHECK(frame.Identifier != 0x18a);
+        fake::inject(new_id, {});
+        wait_for([] {
+            for (const auto& frame : fake::transmitted()) if (frame.Identifier == 0x18a) return true;
+            return false;
+        });
+    };
+    check_sync(0x80, 0x90);
+    CHECK(sdo_download(0x1005, 0, 0x91, 4).Payload[0] == 0x60);
+    check_sync(0x90, 0x91);
+    for (uint32_t invalid : {0xa0U, 0x18aU, 0x40000080U, 0x70aU})
+        CHECK(sdo_download(0x1005, 0, invalid, 4).Payload[0] == 0x80);
+    CHECK(sdo_upload(0x1005) == 0x91);
+    CHECK(sdo_download(0x1014, 0, 0xa1, 4).Payload[0] == 0x80);
+    CHECK(sdo_download(0x1014, 0, 0x800000a0, 4).Payload[0] == 0x60);
+    CHECK(sdo_upload(0x1014) == 0x800000a0);
+    CHECK(sdo_download(0x1014, 0, 0x800000a1, 4).Payload[0] == 0x60);
+    CHECK(sdo_download(0x1014, 0, 0x91, 4).Payload[0] == 0x80);
+    CHECK(sdo_download(0x1014, 0, 0x18a, 4).Payload[0] == 0x80);
+    CHECK(sdo_download(0x1014, 0, 0xa1, 4).Payload[0] == 0x60);
+    CHECK(sdo_download(0x1015, 0, 20, 2).Payload[0] == 0x60);
+    fake::clear_transmitted();
+    CHECK(xnet_canopen_set_fault(f.device, 0x40, 0x5000, 42, 1) == 0);
+    wait_for([] {
+        for (const auto& frame : fake::transmitted())
+            if (frame.Identifier == 0xa1 && frame.Payload[1] == 0x50) return true;
+        return false;
+    });
+    CHECK(xnet_canopen_stop(f.device) == 0); f.start();
+    CHECK(sdo_upload(0x1005) == 0x91 && sdo_upload(0x1014) == 0xa1 && sdo_upload(0x1015) == 20);
+    exchange(0, {0x82, 10}, 0x70a, 0);
+    CHECK(sdo_upload(0x1005) == 0x90 && sdo_upload(0x1014) == 0xa0 && sdo_upload(0x1015) == 10);
+    CHECK(sdo_download(0x1800, 1, 0x8000018a, 4).Payload[0] == 0x80);
+    CHECK(sdo_download(0x1a00, 0, 0, 1).Payload[0] == 0x80);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    j.erase("emcy");
+    f.model(j); CHECK(f.initialize() == 0); f.start();
+    CHECK(sdo_upload(0x1014) == 0x8a);
+    CHECK(sdo_download(0x1014, 0, 0x8000008a, 4).Payload[0] == 0x60);
+    CHECK(xnet_canopen_stop(f.device) == 0); f.start();
+    CHECK(sdo_upload(0x1014) == 0x8000008a);
+    CHECK(sdo_download(0x1014, 0, 0xa2, 4).Payload[0] == 0x60);
+    CHECK(xnet_canopen_stop(f.device) == 0); f.start();
+    CHECK(sdo_upload(0x1014) == 0xa2);
+    exchange(0, {0x82, 10}, 0x70a, 0);
+    CHECK(sdo_upload(0x1014) == 0x8a);
+}
+
+void sync_configuration_and_validation() {
+    Fixture f;
+    auto j = xco::read_json(f.model_path);
+    j["sync"] = {{"cob_id", 0x90}};
+    j["emcy"] = {{"cob_id", 0x90}};
+    f.model(j); CHECK(f.initialize() == XNET_CO_MODEL_ERROR);
+    CHECK(fake::sessions() == 0);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    j["emcy"]["cob_id"] = 0xa0;
+    j["tpdos"][0]["cob_id"] = 0x90;
+    f.model(j); CHECK(f.initialize() == XNET_CO_MODEL_ERROR);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    j["tpdos"][0].erase("cob_id");
+    j["sync"]["counter_overflow"] = 2;
+    f.model(j); CHECK(f.initialize() == 0); f.start();
+    CHECK(sdo_upload(0x1019) == 2);
+    CHECK(sdo_download(0x1006, 0, 20000, 4).Payload[0] == 0x60);
+    CHECK(sdo_download(0x1007, 0, 1000, 4).Payload[0] == 0x60);
+    CHECK(sdo_upload(0x1006) == 20000 && sdo_upload(0x1007) == 1000);
+    fake::inject(0x90, {1});
+    wait_for([&] {
+        std::lock_guard<std::recursive_mutex> lock(f.device->mutex);
+        return f.device->co->SYNC->syncIsOutsideWindow && f.device->co->SYNC->timeoutError == 2;
+    });
+    CHECK(xnet_canopen_stop(f.device) == 0); f.start();
+    CHECK(sdo_upload(0x1006) == 20000 && sdo_upload(0x1007) == 1000);
+    exchange(0, {0x81, 10}, 0x70a, 0);
+    CHECK(sdo_upload(0x1006) == 0 && sdo_upload(0x1007) == 0 && sdo_upload(0x1019) == 2);
+}
+
 void persistence_atomicity() {
     Fixture f;
     const auto contents = xco::Json{{"original", true}};
@@ -577,7 +789,10 @@ int main() {
         {"Reset Node with invalid persistence", reset_with_invalid_persistence},
         {"errors and cleanup", errors_and_cleanup}, {"caller-managed resources", caller_managed_resources},
         {"queues and filtering", queues_and_filtering}, {"concurrent channels", concurrent_channels},
-        {"synchronous TPDO requests", synchronous_requests}, {"atomic persistence", persistence_atomicity}};
+        {"synchronous TPDO requests", synchronous_requests}, {"node guarding", node_guarding},
+        {"heartbeat and guarding switching", supervision_switching}, {"configurable SYNC and EMCY", configurable_services},
+        {"SYNC timers and service validation", sync_configuration_and_validation},
+        {"atomic persistence", persistence_atomicity}};
     int failed = 0;
     for (const auto& test : tests) {
         try { test.second(); std::cout << "PASS " << test.first << "\n"; }

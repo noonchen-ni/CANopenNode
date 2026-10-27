@@ -1,6 +1,19 @@
 #ifndef XNET_CANOPEN_H
 #define XNET_CANOPEN_H
 
+/**
+ * @file
+ * C ABI for one CANopen slave simulated over NI-XNET.
+ *
+ * The library owns CAN transport, protocol processing and OD storage; an external
+ * model supplies application behavior through batch access. PDO tx/rx directions
+ * are relative to the simulated slave, not to the VeriStand model. No function
+ * interprets a CiA 402 controlword or generates the application's statusword.
+ *
+ * Runtime state, CANopen NMT state and an application's drive state are separate.
+ * Unless explicitly documented otherwise, output values are usable only after
+ * checking the operation result and any required per-entry results.
+ */
 #include <stdint.h>
 
 #if defined(_WIN32)
@@ -43,7 +56,16 @@ enum {
     XNET_CO_RUNTIME_FAILED = 3         /**< Runtime/setup failed; uninitialize before reinitializing. */
 };
 
-/** Synchronized 32-byte status snapshot; fields other than runtime_state are zero before initialization. */
+/**
+ * Synchronized 32-byte status snapshot, represented by eight consecutive uint32s.
+ * Fields other than runtime_state are zero before initialization. The final word
+ * replaces the former reserved field without changing the structure's size.
+ *
+ * node_guarding_timeout is a current condition, not a latched event history.
+ * A new guarding request, disabled monitoring, enabled heartbeat, or stack
+ * restart/reset clears it. The external model decides the drive-level reaction;
+ * the communication stack independently applies its NMT/error-reporting policy.
+ */
 typedef struct {
     uint32_t runtime_state;        /**< One of XNET_CO_RUNTIME_*, not an API result. */
     uint32_t nmt_state;            /**< CANopen NMT state value; 0 while initializing/unconfigured. */
@@ -52,7 +74,7 @@ typedef struct {
     uint32_t active_bitrate_kbps;  /**< Current physical interface bitrate in kbit/s. */
     uint32_t pending_bitrate_kbps; /**< LSS-configured bitrate, applied by activation. */
     uint32_t can_error_status;     /**< CANopenNode CO_CAN_ERR_* bitmask, not an API result. */
-    uint32_t reserved;             /**< Always zero. */
+    uint32_t node_guarding_timeout; /**< 1 while life guarding has timed out; otherwise 0. */
 } xnet_canopen_status_t;
 
 /**
@@ -115,6 +137,8 @@ XNET_CANOPEN_API int32_t xnet_canopen_stop(xnet_canopen_handle handle);
  * IDs survive stop/start and master resets, but not uninitialize. Prefer binding
  * during setup; no caller array pointer is retained. In LabVIEW, pass numeric
  * arrays as Array Data Pointer, not array handles; verify their lengths first.
+ * Binding validates addresses and sizes, not permission for a later operation.
+ * Keep master-owned command reads separate from model-owned feedback writes.
  */
 XNET_CANOPEN_API int32_t xnet_canopen_bind_batch(
     xnet_canopen_handle handle, const uint16_t* indices,
@@ -131,6 +155,9 @@ XNET_CANOPEN_API int32_t xnet_canopen_bind_batch(
  * string slots have fixed capacity. Only successful entry results identify valid
  * output. Entry failures do not stop later entries; overall result is
  * XNET_CO_PARTIAL_FAILURE if any entry fails. OD callbacks run under the OD lock.
+ * Local reads currently require SDO-readable metadata, even if an object can be
+ * written by the master. A successful read reports the stored value, not its age
+ * or proof that a new RPDO/SDO command arrived since the previous read.
  */
 XNET_CANOPEN_API int32_t xnet_canopen_read_batch(
     xnet_canopen_handle handle, uint32_t batch_id, uint8_t* buffer,
@@ -144,6 +171,10 @@ XNET_CANOPEN_API int32_t xnet_canopen_read_batch(
  * Call-wide validation precedes writes. Entry failures allow later writes and
  * return XNET_CO_PARTIAL_FAILURE, without rollback of earlier successes.
  * Serialized writes are last-successful-write-wins; no TPDO is requested here.
+ * local_write is independent of SDO access: SDO read-only feedback can be written
+ * by the model when local_write is true. SDO read/write permission alone does
+ * not authorize local writes. Successful local writes do not emit EMCY or run
+ * an application state machine; the caller explicitly supplies those actions.
  */
 XNET_CANOPEN_API int32_t xnet_canopen_write_batch(
     xnet_canopen_handle handle, uint32_t batch_id, const uint8_t* buffer,

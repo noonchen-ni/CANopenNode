@@ -1,3 +1,10 @@
+/**
+ * @file
+ * JSON file I/O and platform-specific durable replacement.
+ * This layer knows nothing about LSS or drive parameters; device.cpp chooses
+ * what to store and when to acknowledge a successful protocol store request.
+ * Callers provide an existing parent directory and coordinate path ownership.
+ */
 #include "internal.hpp"
 
 #include <fstream>
@@ -13,6 +20,11 @@
 #endif
 
 namespace xco {
+/**
+ * Parse one JSON document, with a preflight file-size check and explicit errors.
+ * Whitespace after the document is allowed; a second document or other trailing
+ * content is not. Schema validation is the caller's responsibility.
+ */
 Json read_json(const std::filesystem::path& path) {
     std::error_code ec;
     auto size = std::filesystem::file_size(path, ec);
@@ -31,6 +43,13 @@ Json read_json(const std::filesystem::path& path) {
     }
 }
 
+/**
+ * Write a complete replacement beside the destination, then atomically replace
+ * the destination name. Never truncate the previous file while preparing bytes.
+ * Return only after the platform's durability steps succeed. An error after
+ * replacement may mean the new file is visible but durability is not confirmed;
+ * callers must not interpret every failure as preservation of the old contents.
+ */
 void write_json_atomic(const std::filesystem::path& path, const Json& value) {
     auto directory = path.parent_path();
     require(!directory.empty(), XNET_CO_IO_ERROR, "persistence path must have a parent directory");
@@ -40,6 +59,8 @@ void write_json_atomic(const std::filesystem::path& path, const Json& value) {
         + std::to_string(Clock::now().time_since_epoch().count()) + "." + std::to_string(sequence++));
     const std::string bytes = value.dump(2) + "\n";
 #ifdef _WIN32
+    // Flush and close before replacement; Windows cannot rename this exclusively
+    // opened file while its handle is live. MoveFileEx requests write-through.
     HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     require(file != INVALID_HANDLE_VALUE, XNET_CO_IO_ERROR, "cannot create " + temporary.string());
     DWORD written = 0;
@@ -51,6 +72,8 @@ void write_json_atomic(const std::filesystem::path& path, const Json& value) {
         throw Error(XNET_CO_IO_ERROR, "persistence replacement failed: " + path.string());
     }
 #else
+    // O_EXCL refuses a preexisting temporary name; O_CLOEXEC avoids leaking the
+    // descriptor across exec. Complete short writes and retry interrupted writes.
     int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     require(fd >= 0, XNET_CO_IO_ERROR, "cannot create " + temporary.string() + ": " + std::strerror(errno));
     size_t offset = 0;

@@ -1,6 +1,13 @@
 #ifndef XNET_CO_INTERNAL_HPP
 #define XNET_CO_INTERNAL_HPP
 
+/**
+ * @file
+ * Private ownership and synchronization model shared by the integration units.
+ * Public callers see only the opaque handle in xnet_canopen.h. Stack-facing
+ * pointers below borrow storage owned by Model or by the current CO_t allocation;
+ * teardown and reset ordering must respect those different lifetimes.
+ */
 #define OD_DEFINITION
 #include "CANopen.h"
 #include "xnet_canopen.h"
@@ -35,7 +42,9 @@ void require(bool condition, int32_t code, const std::string& message);
 /** Numeric range for configured Classical CAN rates in kbit/s; XNET checks hardware support. */
 bool valid_bitrate(uint16_t kbps);
 uint64_t unsigned_number(const Json& value, uint64_t maximum, const std::string& where);
+/** Read one bounded-size JSON file and reject trailing non-whitespace content. */
 Json read_json(const std::filesystem::path& path);
+/** Replace one JSON file durably; errors after replacement do not imply rollback. */
 void write_json_atomic(const std::filesystem::path& path, const Json& value);
 
 /**
@@ -90,10 +99,16 @@ struct Model {
     uint16_t startup_bitrate = 125; /**< JSON startup bitrate in kbit/s, before persistence overrides. */
     uint16_t rpdo_count = 0, tpdo_count = 0; /**< Configured receive/transmit PDO counts, respectively. */
     uint32_t worker_period_us = 1000; /**< Worker wait interval in microseconds; not a hard real-time guarantee. */
+    bool emcy_reconfigured = false; /**< An SDO-selected EMCY ID must survive stop/start without startup rebasing. */
+    /** Construct storage/descriptors before stack allocation; not a runtime OD merge. */
     void load(const Json& root);
+    /** Restore communication defaults, optionally application defaults, then resolve node-relative IDs. */
     void restore(bool reset_all_objects, uint8_t node);
+    /** Rebase startup-relative IDs without overwriting live application values. */
     void resolve_node(uint8_t node);
     Value& value(uint16_t index, uint8_t sub);
+    /** Check a proposed SYNC/EMCY ID against reserved IDs and other local services. */
+    bool communication_id_available(uint16_t index, uint32_t cob_id);
     void configure();
 };
 
@@ -154,6 +169,20 @@ struct xnet_canopen_device {
     std::unique_ptr<xco::Model> model; /**< Owning runtime OD/model; null when uninitialized. */
     xco::Adapter adapter; /**< Sessions used exclusively by this context's frame I/O. */
     CO_t* co = nullptr; /**< Owning CANopenNode allocation, released with CO_delete; may be replaced on reset. */
+    /**
+     * Decorates one stack-installed OD callback with integration validation.
+     * original borrows the current stack's callback/context; it must be refreshed
+     * after every CO_t rebuild. extension itself has stable device-owned storage.
+     * Delegation must restore original.stream.object, not pass this wrapper's
+     * context to a callback expecting CO_SYNC_t, CO_EM_t, or a guarding/NMT object.
+     */
+    struct CommunicationOD {
+        xnet_canopen_device* device = nullptr;
+        uint16_t index = 0;
+        OD_IO_t original{};
+        OD_extension_t extension{};
+    };
+    std::array<CommunicationOD, 5> communication_od{}; /**< SYNC, guard time/factor, EMCY ID, heartbeat time. */
     uint8_t pending_node = 10, active_node = 10; /**< LSS-selected and stack-applied node IDs; 255 means unconfigured. */
     uint16_t pending_bitrate = 125, active_bitrate = 125; /**< Requested and applied physical bitrates in kbit/s. */
     uint32_t next_batch = 1; /**< Next batch ID; never reused within this handle, with 0 marking exhaustion. */
@@ -192,6 +221,8 @@ struct xnet_canopen_device {
     static bool_t check_bitrate(void*, uint16_t rate);
     static void activate_bitrate(void*, uint16_t delay);
     static bool_t store(void*, uint8_t node, uint16_t bitrate);
+    static ODR_t read_communication(OD_stream_t*, void*, OD_size_t, OD_size_t*);
+    static ODR_t write_communication(OD_stream_t*, const void*, OD_size_t, OD_size_t*);
 };
 
 #endif

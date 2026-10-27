@@ -1,3 +1,10 @@
+/**
+ * @file
+ * Public ABI, device lifecycle and the single protocol-processing worker.
+ * The lifecycle mutex serializes host calls; the recursive runtime mutex protects
+ * OD/service state shared with the worker. Application/drive behavior remains in
+ * the external model, which exchanges values through the batch API.
+ */
 #include "internal.hpp"
 
 #include <algorithm>
@@ -9,6 +16,12 @@ using xco::Error;
 using xco::require;
 
 namespace {
+/**
+ * C ABI gateway: serialize the operation and translate typed/standard exceptions
+ * to operation results plus a per-handle diagnostic. The lifecycle lock stays
+ * owned even when an operation unlocks the runtime mutex to join the worker.
+ * This cannot make a fabricated handle or concurrent destroy safe.
+ */
 template<class Function> int32_t call(xnet_canopen_handle d, Function function) noexcept {
     if (!d) return XNET_CO_INVALID_ARGUMENT;
     try {
@@ -31,12 +44,15 @@ template<class Function> int32_t call(xnet_canopen_handle d, Function function) 
     }
 }
 void stack_ok(CO_ReturnError_t status, uint32_t info, const char* stage) {
+    // An LSS-unconfigured node is a valid initialized runtime, not a setup failure.
     require(status == CO_ERROR_NO || status == CO_ERROR_NODE_ID_UNCONFIGURED_LSS,
         XNET_CO_STACK_ERROR, std::string(stage) + ": stack status " + std::to_string(status) + ", OD index " + std::to_string(info));
 }
 }
 
 void xnet_canopen_device::fail(int32_t code, std::string_view message) noexcept {
+    // Fixed-capacity diagnostics remain usable while reporting allocation errors.
+    // Successful operations do not clear this snapshot; callers clear explicitly.
     error_code = code;
     const auto size = std::min(message.size(), error_message.size() - 1);
     std::memcpy(error_message.data(), message.data(), size);
@@ -46,6 +62,11 @@ void xnet_canopen_device::initialized() const {
     require(model && co && state != XNET_CO_RUNTIME_UNINITIALIZED, XNET_CO_INVALID_STATE, "device is not initialized");
 }
 
+/**
+ * Load only persisted LSS identity/node/bitrate settings, not application OD data.
+ * Both settings fall back together to JSON startup values on a load error, which
+ * is retained in diagnostics. Disk I/O precedes the short locked state update.
+ */
 void xnet_canopen_device::load_persistent() {
     auto node = model->startup_node;
     auto rate = model->startup_bitrate;
@@ -74,6 +95,12 @@ void xnet_canopen_device::load_persistent() {
     pending_bitrate = rate;
 }
 
+/**
+ * Recreate protocol services over the existing Model and XNET sessions.
+ * Called with runtime access serialized, before worker launch or by the worker
+ * during a reset. OD storage/batch addresses survive; stack allocations and their
+ * extensions do not. This function deliberately does not restore OD defaults.
+ */
 void xnet_canopen_device::setup_stack() {
     outgoing.clear();
     // Extensions point into the old stack allocation; detach them before rebuilding services.
@@ -93,12 +120,91 @@ void xnet_canopen_device::setup_stack() {
     CO_LSSslave_initCfgStoreCall(co->LSSslave, this, store);
     active_node = pending_node;
     uint32_t info = 0;
+    // Keep NMT startup Pre-operational and apply the existing bus-off/heartbeat
+    // error policy. A life-guard timeout shares the stack's heartbeat-error bit;
+    // this policy is separate from the external model's drive fault reaction.
     auto init_result = CO_CANopenInit(co, nullptr, nullptr, &model->od, nullptr,
         CO_NMT_ERR_ON_BUSOFF_HB, 500, 1000, 1000, false, active_node, &info);
     stack_ok(init_result, info, "CANopen initialization");
     info = 0;
     auto result = CO_CANopenInitPDO(co, co->em, &model->od, active_node, &info);
     stack_ok(result, info, "PDO initialization");
+    if (!co->nodeIdUnconfigured) {
+        // Capture the stack-installed callbacks before decorating them. Keeping
+        // those callbacks (rather than raw OD writes) preserves filter/timer
+        // updates and EMCY's computed readback. Repeat after every stack rebuild.
+        const uint16_t indices[] = {0x1005, 0x100c, 0x100d, 0x1014, 0x1017};
+        for (size_t i = 0; i < communication_od.size(); ++i) {
+            auto& binding = communication_od[i];
+            binding.device = this;
+            binding.index = indices[i];
+            auto* entry = OD_find(&model->od, binding.index);
+            require(OD_getSub(entry, 0, &binding.original, false) == ODR_OK,
+                XNET_CO_STACK_ERROR, "cannot bind communication OD handler");
+            binding.extension = {};
+            binding.extension.object = &binding;
+            binding.extension.read = read_communication;
+            binding.extension.write = write_communication;
+            require(OD_extension_init(entry, &binding.extension) == ODR_OK,
+                XNET_CO_STACK_ERROR, "cannot install communication OD handler");
+        }
+    }
+}
+
+/**
+ * Delegate readback using the original service's context and caller's progress.
+ * A local stream copy prevents the wrapper from losing its own dispatch context;
+ * only transfer progress is copied back for the next OD access segment.
+ */
+ODR_t xnet_canopen_device::read_communication(OD_stream_t* stream, void* buffer, OD_size_t count, OD_size_t* transferred) {
+    auto& binding = *static_cast<CommunicationOD*>(stream->object);
+    auto original = *stream;
+    original.object = binding.original.stream.object;
+    const auto result = binding.original.read(&original, buffer, count, transferred);
+    stream->dataOffset = original.dataOffset;
+    return result;
+}
+
+/**
+ * Add cross-service checks before invoking the stack's validated OD writer.
+ * Called under the runtime mutex through OD I/O; no lifecycle lock is acquired.
+ * Returning ODR_* lets the SDO server report a protocol abort without first
+ * accepting an invalid value or changing the active filter/timer configuration.
+ */
+ODR_t xnet_canopen_device::write_communication(
+    OD_stream_t* stream, const void* buffer, OD_size_t count, OD_size_t* transferred) {
+    auto& binding = *static_cast<CommunicationOD*>(stream->object);
+    auto& d = *binding.device;
+    if (!buffer || !transferred || stream->subIndex != 0 || count != stream->dataLength) return ODR_TYPE_MISMATCH;
+    if (binding.index == 0x1005 || binding.index == 0x1014) {
+        if (!d.model->communication_id_available(binding.index, CO_getUint32(buffer))) return ODR_INVALID_VALUE;
+    } else if (binding.index == 0x100c || binding.index == 0x100d) {
+        // Combine the proposed field with the other field's active value. Widen
+        // before multiplying: the individual OD types fit but their product may not.
+        const auto guard = binding.index == 0x100c ? uint64_t(CO_getUint16(buffer))
+                                                  : uint64_t(d.co->NGslave->guardTime_us / 1000);
+        const auto factor = binding.index == 0x100d ? uint64_t(CO_getUint8(buffer))
+                                                   : uint64_t(d.co->NGslave->lifeTimeFactor);
+        if (guard * factor * 1000 > UINT32_MAX) return ODR_INVALID_VALUE;
+    }
+    auto original = *stream;
+    original.object = binding.original.stream.object;
+    const auto result = binding.original.write(&original, buffer, count, transferred);
+    stream->dataOffset = original.dataOffset;
+    if (result == ODR_OK) {
+        // Preserve accepted EMCY routing, including its disable bit, across a
+        // stop/start. An explicit communication/node reset restores JSON defaults.
+        if (binding.index == 0x1014) d.model->emcy_reconfigured = true;
+        if (d.co->NMT->HBproducerTime_us > 0 || d.co->NGslave->lifeTime_us == 0) {
+            // Stopping supervision must also clear a previously raised error.
+            // HB consumer is disabled in this port, so this shared stack error
+            // bit represents life guarding here, not another monitored peer.
+            if (d.co->NGslave->lifeTimeTimeout) CO_errorReset(d.co->em, CO_EM_HEARTBEAT_CONSUMER, 0);
+            d.co->NGslave->lifeTimeTimeout = false;
+            d.co->NGslave->lifeTimer = 0;
+        }
+    }
+    return result;
 }
 
 void xnet_canopen_device::reset_stack(bool reset_all_objects) {
@@ -181,6 +287,12 @@ bool_t xnet_canopen_device::store(void* context, uint8_t node, uint16_t bitrate)
     }
 }
 
+/**
+ * Sole owner of frame dispatch and protocol time advancement while running.
+ * Elapsed time is measured between loop starts, not assumed equal to the wait
+ * interval. Host batch calls can interleave only while the runtime lock is
+ * released; the external model is not executed between RPDO and TPDO processing.
+ */
 void xnet_canopen_device::run() {
     std::unique_lock<std::recursive_mutex> lock(mutex);
     worker_lock = &lock;
@@ -237,6 +349,11 @@ void xnet_canopen_device::run() {
     worker_lock = nullptr;
 }
 
+/**
+ * Join outside the runtime lock, then discard traffic while retaining the OD.
+ * Public callers keep lifecycle ownership across this unlocked phase so another
+ * host call cannot start/free resources before shutdown has completed.
+ */
 void xnet_canopen_device::stop() {
     stop_requested = true;
     wake.notify_all();
@@ -251,6 +368,11 @@ void xnet_canopen_device::stop() {
     if (state != XNET_CO_RUNTIME_FAILED) state = XNET_CO_RUNTIME_STOPPED;
 }
 
+/**
+ * Release in dependency order: join worker, close XNET, free stack, then OD.
+ * If session release fails, leave stack/model resources available for a cleanup
+ * retry instead of invalidating the handle while hardware references remain.
+ */
 void xnet_canopen_device::release() {
     if (worker.joinable()) stop();
     std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -272,6 +394,8 @@ int32_t xnet_canopen_create(xnet_canopen_handle* handle) {
 }
 
 int32_t xnet_canopen_destroy(xnet_canopen_handle handle) {
+    // Delete only after the guarded cleanup succeeds; failures retain diagnostics
+    // and a valid context for the caller's explicit cleanup retry.
     auto result = call(handle, [](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>& lock) {
         lock.unlock(); d.release(); return XNET_CO_OK;
     });
@@ -322,6 +446,8 @@ int32_t xnet_canopen_start(xnet_canopen_handle handle) {
         if (d.state == XNET_CO_RUNTIME_RUNNING) return XNET_CO_OK;
         require(d.state == XNET_CO_RUNTIME_STOPPED, XNET_CO_INVALID_STATE, "uninitialize a failed device before restarting");
         try {
+            // A new stack restarts protocol state without resetting live OD
+            // values. Launch only after sessions and CANnormal are ready.
             d.setup_stack();
             d.adapter.start();
             CO_CANsetNormalMode(d.co->CANmodule);
@@ -365,6 +491,12 @@ int32_t xnet_canopen_bind_batch(xnet_canopen_handle handle, const uint16_t* indi
     });
 }
 
+/**
+ * Shared batch executor. Validate the whole buffer/layout before touching values,
+ * then attempt every entry independently under one runtime lock. This prevents
+ * worker interleaving, not partial commits: earlier writes are not rolled back.
+ * Fresh OD streams preserve service callbacks after resets and between transfers.
+ */
 static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* read_buffer, const uint8_t* write_buffer,
                         uint32_t buffer_size, int32_t* statuses, uint32_t count, bool is_write) {
     return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
@@ -381,6 +513,8 @@ static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* 
             statuses[i] = XNET_CO_OK;
             const auto& b = batch.bindings[i];
             auto& v = d.model->value(b.index, b.subindex);
+            // Local-write ownership is separate from network SDO permissions.
+            // Local reads currently still require the network SDO-readable flag.
             if ((is_write && !v.allows_local_write) || (!is_write && !(v.attr & ODA_SDO_R))) {
                 statuses[i] = XNET_CO_ACCESS_ERROR;
             } else {
@@ -448,6 +582,7 @@ int32_t xnet_canopen_get_status(xnet_canopen_handle handle, xnet_canopen_status_
             status->can_error_status = d.co->CANmodule->CANerrorStatus;
             status->active_node_id = d.active_node; status->pending_node_id = d.pending_node;
             status->active_bitrate_kbps = d.active_bitrate; status->pending_bitrate_kbps = d.pending_bitrate;
+            status->node_guarding_timeout = d.co->NGslave->lifeTimeTimeout ? 1U : 0U;
         }
         return XNET_CO_OK;
     });

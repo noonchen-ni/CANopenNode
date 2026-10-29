@@ -100,6 +100,9 @@ XNET_CANOPEN_API int32_t xnet_canopen_destroy(xnet_canopen_handle handle);
  * without failing initialization. Sessions are not started.
  * Failure releases partial resources when possible; inspect diagnostics and
  * retry uninitialize if cleanup also fails. See README.md for the JSON schema.
+ * The macro-configured log file is opened before XNET sessions; logging startup
+ * failure returns XNET_CO_IO_ERROR. Later logging failures are reported through
+ * diagnostics/stderr without rolling back communication operations.
  */
 XNET_CANOPEN_API int32_t xnet_canopen_initialize(
     xnet_canopen_handle handle, const char* interface_name,

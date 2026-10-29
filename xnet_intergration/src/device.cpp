@@ -48,15 +48,30 @@ void stack_ok(CO_ReturnError_t status, uint32_t info, const char* stage) {
     require(status == CO_ERROR_NO || status == CO_ERROR_NODE_ID_UNCONFIGURED_LSS,
         XNET_CO_STACK_ERROR, std::string(stage) + ": stack status " + std::to_string(status) + ", OD index " + std::to_string(info));
 }
+const char* nmt_log_message(CO_NMT_internalState_t state) {
+    switch (state) {
+        case CO_NMT_INITIALIZING: return "NMT Initializing";
+        case CO_NMT_PRE_OPERATIONAL: return "NMT Pre-operational";
+        case CO_NMT_OPERATIONAL: return "NMT Operational";
+        case CO_NMT_STOPPED: return "NMT Stopped";
+        default: return "NMT Unknown";
+    }
+}
 }
 
 void xnet_canopen_device::fail(int32_t code, std::string_view message) noexcept {
     // Fixed-capacity diagnostics remain usable while reporting allocation errors.
     // Successful operations do not clear this snapshot; callers clear explicitly.
-    error_code = code;
     const auto size = std::min(message.size(), error_message.size() - 1);
+    const bool changed = error_code != code || std::strlen(error_message.data()) != size
+        || std::memcmp(error_message.data(), message.data(), size) != 0;
+    error_code = code;
     std::memcpy(error_message.data(), message.data(), size);
     error_message[size] = 0;
+    // Repeated identical queue/driver errors must not flood the file each cycle.
+    if (changed) {
+        log(xco::LogLevel::error, "error code={}: {}", code, error_message.data());
+    }
 }
 void xnet_canopen_device::initialized() const {
     require(model && co && state != XNET_CO_RUNTIME_UNINITIALIZED, XNET_CO_INVALID_STATE, "device is not initialized");
@@ -133,7 +148,7 @@ void xnet_canopen_device::setup_stack() {
         // Capture the stack-installed callbacks before decorating them. Keeping
         // those callbacks (rather than raw OD writes) preserves filter/timer
         // updates and EMCY's computed readback. Repeat after every stack rebuild.
-        const uint16_t indices[] = {0x1005, 0x100c, 0x100d, 0x1014, 0x1017};
+        const uint16_t indices[] = {0x1005, 0x1006, 0x1007, 0x100c, 0x100d, 0x1014, 0x1015, 0x1017};
         for (size_t i = 0; i < communication_od.size(); ++i) {
             auto& binding = communication_od[i];
             binding.device = this;
@@ -149,6 +164,7 @@ void xnet_canopen_device::setup_stack() {
                 XNET_CO_STACK_ERROR, "cannot install communication OD handler");
         }
     }
+    log(xco::LogLevel::info, "CANopen services initialized");
 }
 
 /**
@@ -203,11 +219,15 @@ ODR_t xnet_canopen_device::write_communication(
             d.co->NGslave->lifeTimeTimeout = false;
             d.co->NGslave->lifeTimer = 0;
         }
+        const uint32_t value = count == 1 ? CO_getUint8(buffer) : count == 2 ? CO_getUint16(buffer) : CO_getUint32(buffer);
+        d.log(xco::LogLevel::info, "communication OD updated: index=0x{:04x} value=0x{:08x}",
+            unsigned(binding.index), unsigned(value));
     }
     return result;
 }
 
 void xnet_canopen_device::reset_stack(bool reset_all_objects) {
+    log(xco::LogLevel::info, reset_all_objects ? "Reset Node requested" : "Reset Communication requested");
     adapter.stop_flush();
     // Reset Node reloads saved/startup LSS settings and restores all OD defaults.
     // Reset Communication preserves device data and the pending LSS settings.
@@ -223,6 +243,7 @@ void xnet_canopen_device::reset_stack(bool reset_all_objects) {
     setup_stack();
     adapter.start();
     CO_CANsetNormalMode(co->CANmodule);
+    log(xco::LogLevel::info, "CANopen reset completed");
 }
 
 /**
@@ -256,6 +277,7 @@ void xnet_canopen_device::activate_bitrate(void* context, uint16_t delay) {
         for (auto& pending : d.outgoing) pending.buffer->bufferFull = false;
         d.outgoing.clear();
         d.switch_deadline = xco::Clock::now() + std::chrono::milliseconds(delay);
+        d.log(xco::LogLevel::info, "LSS bitrate activation: pre-switch silence");
     } catch (const Error& e) {
         d.fail(e.code, e.what()); d.state = XNET_CO_RUNTIME_FAILED; d.stop_requested = true;
     }
@@ -279,6 +301,7 @@ bool_t xnet_canopen_device::store(void* context, uint8_t node, uint16_t bitrate)
     try {
         xco::write_json_atomic(path, saved);
         d.worker_lock->lock();
+        d.log(xco::LogLevel::info, "LSS configuration stored");
         return true;
     } catch (const std::exception& e) {
         d.worker_lock->lock();
@@ -297,6 +320,10 @@ void xnet_canopen_device::run() {
     std::unique_lock<std::recursive_mutex> lock(mutex);
     worker_lock = &lock;
     auto previous = xco::Clock::now();
+    CO_NMT_internalState_t previous_nmt = CO_NMT_UNKNOWN;
+    bool previous_guard_timeout = false;
+    uint8_t previous_pending_node = pending_node;
+    uint16_t previous_pending_bitrate = pending_bitrate;
     try {
         while (!stop_requested) {
             auto now = xco::Clock::now();
@@ -309,11 +336,13 @@ void xnet_canopen_device::run() {
                     if (switching == Switch::before) {
                         adapter.bitrate(pending_bitrate);
                         active_bitrate = pending_bitrate;
+                        log(xco::LogLevel::info, "LSS bitrate applied: post-switch silence");
                         switching = Switch::after;
                         switch_deadline = xco::Clock::now() + std::chrono::milliseconds(switch_delay_ms);
                     } else {
                         adapter.start();
                         switching = Switch::none;
+                        log(xco::LogLevel::info, "LSS bitrate activation completed");
                     }
                 }
             } else {
@@ -332,6 +361,23 @@ void xnet_canopen_device::run() {
                         if (!stop_requested) transmit();
                     }
                 }
+            }
+            const auto current_nmt = CO_NMT_getInternalState(co->NMT);
+            if (current_nmt != previous_nmt) {
+                log(xco::LogLevel::info, nmt_log_message(current_nmt));
+                previous_nmt = current_nmt;
+            }
+            const bool guard_timeout = co->NGslave->lifeTimeTimeout != 0;
+            if (guard_timeout != previous_guard_timeout) {
+                log(guard_timeout ? xco::LogLevel::warning : xco::LogLevel::info,
+                    guard_timeout ? "life guarding timed out" : "life guarding timeout cleared");
+                previous_guard_timeout = guard_timeout;
+            }
+            if (pending_node != previous_pending_node || pending_bitrate != previous_pending_bitrate) {
+                log(xco::LogLevel::info, "LSS pending settings: node_id={} bitrate_kbps={}",
+                    unsigned(pending_node), unsigned(pending_bitrate));
+                previous_pending_node = pending_node;
+                previous_pending_bitrate = pending_bitrate;
             }
             // wait_for releases the OD lock, allowing channel calls between worker cycles.
             wake.wait_for(lock, std::chrono::microseconds(model->worker_period_us), [&] { return stop_requested.load(); });
@@ -355,6 +401,7 @@ void xnet_canopen_device::run() {
  * host call cannot start/free resources before shutdown has completed.
  */
 void xnet_canopen_device::stop() {
+    const bool had_worker = worker.joinable();
     stop_requested = true;
     wake.notify_all();
     // The worker reacquires the OD lock during shutdown; never join while holding it.
@@ -366,6 +413,7 @@ void xnet_canopen_device::stop() {
     switching = Switch::none;
     co->CANmodule->CANnormal = false;
     if (state != XNET_CO_RUNTIME_FAILED) state = XNET_CO_RUNTIME_STOPPED;
+    if (had_worker) log(xco::LogLevel::info, "device stopped");
 }
 
 /**
@@ -378,6 +426,7 @@ void xnet_canopen_device::release() {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     adapter.close();
     outgoing.clear();
+    if (co || model) log(xco::LogLevel::info, "device uninitialized");
     if (co) { CO_delete(co); co = nullptr; }
     model.reset();
     batches.clear();
@@ -411,15 +460,19 @@ int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interfac
                 XNET_CO_INVALID_ARGUMENT, "interface, JSON model and persistence paths are required");
         try {
             d.interface_name = interface_name;
+            d.logger = xco::file_logger();
+            d.log_identity = {};
             d.persistence_path = persistence_path;
             d.model = std::make_unique<xco::Model>();
             d.model->load(xco::read_json(model_path));
+            d.log_identity = d.model->identity;
             d.load_persistent();
             d.active_bitrate = d.pending_bitrate;
             d.model->restore(true, d.pending_node);
             d.adapter.open(d.interface_name, d.active_bitrate);
             d.setup_stack();
             d.state = XNET_CO_RUNTIME_STOPPED;
+            d.log(xco::LogLevel::info, "device initialized; communication not started");
         } catch (const std::exception& original) {
             const std::string reason = original.what();
             lock.unlock();
@@ -454,6 +507,7 @@ int32_t xnet_canopen_start(xnet_canopen_handle handle) {
             d.stop_requested = false;
             d.state = XNET_CO_RUNTIME_RUNNING;
             d.worker = std::thread(&xnet_canopen_device::run, &d);
+            d.log(xco::LogLevel::info, "device started");
         } catch (...) { d.state = XNET_CO_RUNTIME_FAILED; throw; }
         return XNET_CO_OK;
     });
@@ -568,7 +622,13 @@ int32_t xnet_canopen_set_fault(xnet_canopen_handle handle, uint8_t bit, uint16_t
         require(d.state == XNET_CO_RUNTIME_RUNNING && !d.co->nodeIdUnconfigured, XNET_CO_INVALID_STATE, "fault requires initialized running node");
         require(bit >= 0x40 && bit <= 0x4f && active <= 1 && (!active || code != 0),
             XNET_CO_INVALID_ARGUMENT, "invalid manufacturer fault bit/code/active");
+        const bool changed = (CO_isError(d.co->em, bit) != 0) != (active != 0);
         CO_error(d.co->em, active != 0, bit, active ? code : CO_EMC_NO_ERROR, info);
+        if (changed) {
+            d.log(active ? xco::LogLevel::warning : xco::LogLevel::info,
+                "fault {}: bit=0x{:02x} code=0x{:04x} info=0x{:08x}",
+                active ? "asserted" : "cleared", unsigned(bit), active ? unsigned(code) : 0U, unsigned(info));
+        }
         return XNET_CO_OK;
     });
 }

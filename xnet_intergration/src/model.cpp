@@ -275,18 +275,26 @@ void Model::load(const Json& root) {
         // Communication and mapping records are generated together so their
         // direction, byte lengths and OD targets cannot disagree at startup.
         const Json list = root.value(key, Json::array());
-        require(list.is_array() && list.size() <= 4, XNET_CO_MODEL_ERROR, std::string(key) + " supports at most four PDOs");
+        require(list.is_array() && list.size() <= 8, XNET_CO_MODEL_ERROR, std::string(key) + " supports at most eight PDOs");
         if (is_transmit_pdo) tpdo_count = static_cast<uint16_t>(list.size()); else rpdo_count = static_cast<uint16_t>(list.size());
         for (size_t i = 0; i < list.size(); ++i) {
             const auto& j = list[i];
-            keys(j, {"cob_id", "transmission_type", "event_ms", "inhibit_100us", "mapping"}, key);
+            keys(j, {"cob_id", "enabled", "transmission_type", "event_ms", "inhibit_100us", "mapping"}, key);
+            require(j.at("mapping").is_array() && j.at("mapping").size() <= 8,
+                    XNET_CO_MODEL_ERROR, "PDO mapping requires 0..8 entries");
+            require(!j.contains("enabled") || j.at("enabled").is_boolean(),
+                    XNET_CO_MODEL_ERROR, "PDO enabled must be boolean");
+            const bool enabled = j.value("enabled", !j.at("mapping").empty());
+            require(!enabled || !j.at("mapping").empty(), XNET_CO_MODEL_ERROR, "enabled PDO requires a nonempty mapping");
+            require(i < 4 || j.contains("cob_id"), XNET_CO_MODEL_ERROR, "PDO5..8 require an explicit COB-ID");
             const uint32_t type = static_cast<uint32_t>(unsigned_number(j.value("transmission_type", Json(255)), 255, "transmission_type"));
             require(type <= 240 || type >= 254, XNET_CO_MODEL_ERROR, "unsupported PDO transmission type");
             const auto default_id = static_cast<uint32_t>((is_transmit_pdo ? 0x180 : 0x200) + i * 0x100);
             const uint32_t cob = static_cast<uint32_t>(unsigned_number(j.value("cob_id", Json(default_id)), 0x7ff, "cob_id"));
             require(!j.contains("cob_id") || !CO_IS_RESTRICTED_CAN_ID(cob), XNET_CO_MODEL_ERROR, "restricted PDO COB-ID");
             const uint16_t comm_index = static_cast<uint16_t>((is_transmit_pdo ? 0x1800 : 0x1400) + i);
-            std::vector<Json> comm{scalar("UNSIGNED8", is_transmit_pdo ? 6 : 5), scalar("UNSIGNED32", cob), scalar("UNSIGNED8", type)};
+            std::vector<Json> comm{scalar("UNSIGNED8", is_transmit_pdo ? 6 : 5),
+                scalar("UNSIGNED32", cob | (enabled ? 0U : 0x80000000U)), scalar("UNSIGNED8", type)};
             if (is_transmit_pdo) {
                 comm.push_back(scalar("UNSIGNED16", j.value("inhibit_100us", Json(0))));
                 comm.push_back(scalar("UNSIGNED8", 0));
@@ -300,8 +308,6 @@ void Model::load(const Json& root) {
             }
             auto& comm_obj = add(comm_index, comm, false);
             comm_obj.values[1].is_node_relative = !j.contains("cob_id");
-            require(j.at("mapping").is_array() && !j.at("mapping").empty() && j.at("mapping").size() <= 8,
-                    XNET_CO_MODEL_ERROR, "PDO mapping requires 1..8 entries");
             std::vector<Json> mapping{scalar("UNSIGNED8", j.at("mapping").size())};
             uint32_t bytes = 0;
             for (const auto& m : j.at("mapping")) {
@@ -387,10 +393,11 @@ void Model::resolve_node(uint8_t node) {
             require(identifiers.insert(cob & 0x7ff).second, XNET_CO_MODEL_ERROR, "communication COB-ID collision");
         }
         for (auto& obj : objects) {
-            if ((obj->index >= 0x1400 && obj->index < 0x1404) || (obj->index >= 0x1800 && obj->index < 0x1804)) {
+            if ((obj->index >= 0x1400 && obj->index < 0x1400 + rpdo_count)
+                || (obj->index >= 0x1800 && obj->index < 0x1800 + tpdo_count)) {
                 auto& cob = value(obj->index, 1);
                 uint32_t id; std::memcpy(&id, cob.data(), 4);
-                require(identifiers.insert(id).second, XNET_CO_MODEL_ERROR, "PDO COB-ID collides with another local CANopen service");
+                require(identifiers.insert(id & 0x7ff).second, XNET_CO_MODEL_ERROR, "PDO COB-ID collides with another local CANopen service");
             }
         }
     }
@@ -409,8 +416,8 @@ bool Model::communication_id_available(uint16_t index, uint32_t cob_id) {
     for (auto& obj : objects) {
         if (obj->index == index) continue;
         uint8_t sub = 0;
-        if ((obj->index >= 0x1400 && obj->index < 0x1404)
-            || (obj->index >= 0x1800 && obj->index < 0x1804)) sub = 1;
+        if ((obj->index >= 0x1400 && obj->index < 0x1400 + rpdo_count)
+            || (obj->index >= 0x1800 && obj->index < 0x1800 + tpdo_count)) sub = 1;
         else if (obj->index != 0x1005 && obj->index != 0x1014 && obj->index != 0x100e) continue;
         uint32_t other; std::memcpy(&other, value(obj->index, sub).data(), sizeof(other));
         if ((other & 0x7ff) == id) return false;

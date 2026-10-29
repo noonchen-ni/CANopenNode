@@ -12,6 +12,7 @@
 #include "CANopen.h"
 #include "xnet_canopen.h"
 #include "nlohmann/json.hpp"
+#include "spdlog/common.h"
 #include "xnet/nixnet.h"
 
 #include <array>
@@ -27,11 +28,19 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
+
+namespace spdlog { class logger; }
 
 namespace xco {
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
+
+enum class LogLevel { info, warning, error };
+uint64_t next_log_instance() noexcept;
+/** Open the macro-selected file before hardware acquisition; failure is an I/O error. */
+std::shared_ptr<spdlog::logger> file_logger();
 
 /** Internal exception carrying a public API result code and a diagnostic message. */
 struct Error : std::runtime_error {
@@ -164,6 +173,9 @@ struct xnet_canopen_device {
     uint32_t state = XNET_CO_RUNTIME_UNINITIALIZED; /**< XNET_CO_RUNTIME_* lifecycle state, not NMT state. */
     int32_t error_code = 0; /**< Latest per-handle XNET_CO_* diagnostic code; 0 when cleared. */
     std::array<char, 2048> error_message{}; /**< NUL-terminated diagnostic text, truncated to fit. */
+    const uint64_t log_instance = xco::next_log_instance(); /**< Process-local handle identity, stable across LSS/reset. */
+    std::array<uint32_t, 4> log_identity{}; /**< Validated CANopen identity retained for failure/cleanup logging. */
+    std::shared_ptr<spdlog::logger> logger; /**< Shared private file logger; null before the first initialize attempt opens it. */
     std::string interface_name; /**< Caller-supplied XNET interface name, copied without normalization. */
     std::filesystem::path persistence_path; /**< Caller-supplied LSS JSON file path, not canonicalized. */
     std::unique_ptr<xco::Model> model; /**< Owning runtime OD/model; null when uninitialized. */
@@ -182,7 +194,7 @@ struct xnet_canopen_device {
         OD_IO_t original{};
         OD_extension_t extension{};
     };
-    std::array<CommunicationOD, 5> communication_od{}; /**< SYNC, guard time/factor, EMCY ID, heartbeat time. */
+    std::array<CommunicationOD, 8> communication_od{}; /**< Writable SYNC, guarding, EMCY and heartbeat settings. */
     uint8_t pending_node = 10, active_node = 10; /**< LSS-selected and stack-applied node IDs; 255 means unconfigured. */
     uint16_t pending_bitrate = 125, active_bitrate = 125; /**< Requested and applied physical bitrates in kbit/s. */
     uint32_t next_batch = 1; /**< Next batch ID; never reused within this handle, with 0 marking exhaustion. */
@@ -209,6 +221,19 @@ struct xnet_canopen_device {
     uint16_t switch_delay_ms = 0; /**< LSS-requested delay in milliseconds, applied before and after the change. */
 
     void fail(int32_t code, std::string_view message) noexcept;
+    /** Caller serializes device state; backend sink serializes writes across handles. */
+    void log(xco::LogLevel level, std::string_view message) noexcept;
+    template<class Arg, class... Args>
+    void log(xco::LogLevel level, spdlog::format_string_t<Arg, Args...> format, Arg&& arg, Args&&... args) noexcept {
+        if (!logger) return;
+        try {
+            const auto message = spdlog::fmt_lib::format(format, std::forward<Arg>(arg), std::forward<Args>(args)...);
+            log(level, std::string_view(message));
+        } catch (const std::exception& e) {
+            log_failure(e.what());
+        }
+    }
+    void log_failure(const char* message) noexcept;
     void initialized() const;
     void load_persistent();
     void setup_stack();

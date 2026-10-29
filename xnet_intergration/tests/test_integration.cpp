@@ -1,9 +1,13 @@
 #include "fake_xnet.hpp"
+#include "logging_config.h"
+#include "spdlog/logger.h"
+#include "spdlog/sinks/base_sink.h"
 
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error( \
     std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " #condition); } while (false)
@@ -373,6 +377,220 @@ void protocol_basics() {
     CHECK(xnet_canopen_set_fault(f.device, 0x40, 0x5000, 123, 1) == 0);
     wait_for([] { for (const auto& frame : fake::transmitted()) if (frame.Identifier == 0x8a && frame.Payload[1] == 0x50) return true; return false; });
     CHECK(xnet_canopen_set_fault(f.device, 0x40, 0, 0, 0) == 0);
+}
+
+xco::Json eight_pdo_model() {
+    auto j = xco::read_json(XNET_CO_EXAMPLE_MODEL);
+    j["rpdos"] = xco::Json::array();
+    j["tpdos"] = xco::Json::array();
+    for (uint16_t i = 0; i < 8; ++i) {
+        j["objects"].push_back({{"index", 0x2100 + i}, {"type", "UNSIGNED16"}, {"value", 0},
+            {"pdo", "rx"}});
+        j["objects"].push_back({{"index", 0x2200 + i}, {"type", "UNSIGNED16"}, {"value", 100 + i},
+            {"access", "ro"}, {"pdo", "tx"}, {"local_write", true}});
+        xco::Json rx = {{"mapping", {{{"index", 0x2100 + i}}}}};
+        xco::Json tx = {{"mapping", {{{"index", 0x2200 + i}}}}};
+        if (i >= 4) {
+            rx["cob_id"] = 0x220 + i - 4;
+            tx["cob_id"] = 0x320 + i - 4;
+        }
+        j["rpdos"].push_back(rx);
+        j["tpdos"].push_back(tx);
+    }
+    return j;
+}
+
+void eight_pdo_validation() {
+    const auto j = eight_pdo_model();
+    auto rejects = [](const xco::Json& bad) {
+        try {
+            xco::Model model; model.load(bad); model.restore(true, 10);
+        } catch (const xco::Error& e) { return e.code == XNET_CO_MODEL_ERROR; }
+        return false;
+    };
+    xco::Model model; model.load(j); model.restore(true, 10);
+    CHECK(model.config.CNT_RPDO == 8 && model.config.CNT_TPDO == 8);
+    CHECK(OD_find(&model.od, 0x1407) && OD_find(&model.od, 0x1607));
+    CHECK(OD_find(&model.od, 0x1807) && OD_find(&model.od, 0x1a07));
+    for (const char* direction : {"rpdos", "tpdos"}) {
+        auto bad = j; bad[direction].push_back(bad[direction][7]); CHECK(rejects(bad));
+        for (size_t i = 4; i < 8; ++i) {
+            bad = j; bad[direction][i].erase("cob_id"); CHECK(rejects(bad));
+        }
+        for (const auto& id : {xco::Json(0), xco::Json(0x800), xco::Json(0x80000320U),
+                               xco::Json(0x58a), xco::Json(0x60a), xco::Json(0x70a), xco::Json(0x80)}) {
+            bad = j; bad[direction][7]["cob_id"] = id; CHECK(rejects(bad));
+        }
+        bad = j; bad[direction][7]["cob_id"] = j[direction][4]["cob_id"]; CHECK(rejects(bad));
+        bad = j; bad[direction][7]["cob_id"] = 0x18a; CHECK(rejects(bad));
+        bad = j; bad[direction][7]["enabled"] = 1; CHECK(rejects(bad));
+        bad = j; bad[direction][7]["mapping"] = xco::Json::array();
+        bad[direction][7]["enabled"] = true; CHECK(rejects(bad));
+        bad = j; bad[direction][7]["mapping"] = xco::Json::object(); CHECK(rejects(bad));
+        bad = j; bad[direction][7]["enabled"] = false;
+        bad[direction][7]["cob_id"] = 0x18a; CHECK(rejects(bad));
+    }
+    auto bad = j; bad["tpdos"][7]["cob_id"] = j["rpdos"][7]["cob_id"]; CHECK(rejects(bad));
+}
+
+void eight_pdo_traffic() {
+    Fixture f; f.model(eight_pdo_model()); CHECK(f.initialize() == 0); f.start(); operational(f);
+    for (uint16_t i = 0; i < 8; ++i) {
+        const auto rx_id = static_cast<uint16_t>(i < 4 ? 0x20a + i * 0x100 : 0x220 + i - 4);
+        const auto tx_id = static_cast<uint16_t>(i < 4 ? 0x18a + i * 0x100 : 0x320 + i - 4);
+        auto batch = f.bind({{static_cast<uint16_t>(0x2100 + i), 0, 2}});
+        uint8_t bytes[2]{}; int32_t status;
+        fake::inject(rx_id, {static_cast<uint8_t>(i + 1), 0x12});
+        wait_for([&] {
+            CHECK(xnet_canopen_read_batch(f.device, batch, bytes, 2, &status, 1) == 0);
+            return bytes[0] == i + 1 && bytes[1] == 0x12;
+        });
+        fake::clear_transmitted();
+        CHECK(xnet_canopen_request_tpdo(f.device, i + 1) == 0);
+        wait_for([&] {
+            for (const auto& frame : fake::transmitted())
+                if (frame.Identifier == tx_id && frame.PayloadLength == 2
+                    && frame.Payload[0] == 100 + i && frame.Payload[1] == 0) return true;
+            return false;
+        });
+    }
+    CHECK(xnet_canopen_request_tpdo(f.device, 9) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(sdo_download(0x1807, 1, 0x80000323, 4).Payload[0] == 0x80);
+    CHECK(sdo_download(0x1a07, 0, 0, 1).Payload[0] == 0x80);
+    CHECK(sdo_download(0x1407, 1, 0x80000223, 4).Payload[0] == 0x80);
+    CHECK(sdo_download(0x1607, 0, 0, 1).Payload[0] == 0x80);
+    for (const uint32_t id : {0x223U, 0x323U}) {
+        CHECK(sdo_download(0x1005, 0, id, 4).Payload[0] == 0x80);
+        CHECK(sdo_download(0x1014, 0, 0x8000008a, 4).Payload[0] == 0x60);
+        CHECK(sdo_download(0x1014, 0, id, 4).Payload[0] == 0x80);
+    }
+    auto feedback = f.bind({{0x2207, 0, 2}});
+    uint8_t bytes[2]{0xab, 0x12}; int32_t status;
+    CHECK(xnet_canopen_write_batch(f.device, feedback, bytes, 2, &status, 1) == 0);
+    auto verify_eighth = [&] {
+        operational(f);
+        fake::clear_transmitted();
+        CHECK(xnet_canopen_request_tpdo(f.device, 8) == 0);
+        wait_for([] {
+            for (const auto& frame : fake::transmitted())
+                if (frame.Identifier == 0x323 && frame.Payload[0] == 0xab && frame.Payload[1] == 0x12) return true;
+            return false;
+        });
+    };
+    CHECK(xnet_canopen_stop(f.device) == 0); f.start(); verify_eighth();
+    exchange(0, {0x82, 10}, 0x70a, 0); verify_eighth();
+    exchange(0, {0x81, 10}, 0x70a, 0);
+    CHECK(xnet_canopen_read_batch(f.device, feedback, bytes, 2, &status, 1) == 0 && bytes[0] == 107 && bytes[1] == 0);
+    fake::inject(0x7e5, {4, 1, 0, 0, 0, 0, 0, 0});
+    CHECK(exchange(0x7e5, {0x11, 42, 0, 0, 0, 0, 0, 0}, 0x7e4, 0x11).Payload[1] == 0);
+    fake::inject(0x7e5, {4, 0, 0, 0, 0, 0, 0, 0});
+    exchange(0, {0x82, 10}, 0x72a, 0);
+    wait_for([&] { return f.status().active_node_id == 42; });
+    operational(f);
+    {
+        std::lock_guard<std::recursive_mutex> lock(f.device->mutex);
+        CHECK(f.device->co->TPDO[0].CANtxBuff->ident == 0x1aa);
+        CHECK(f.device->co->TPDO[7].CANtxBuff->ident == 0x323);
+    }
+    fake::clear_transmitted();
+    CHECK(xnet_canopen_request_tpdo(f.device, 8) == 0);
+    wait_for([] {
+        for (const auto& frame : fake::transmitted())
+            if (frame.Identifier == 0x323 && frame.Payload[0] == 107) return true;
+        return false;
+    });
+    fake::inject(0x223, {0x55, 0x66});
+    const auto received = f.bind({{0x2107, 0, 2}});
+    wait_for([&] {
+        CHECK(xnet_canopen_read_batch(f.device, received, bytes, 2, &status, 1) == 0);
+        return bytes[0] == 0x55 && bytes[1] == 0x66;
+    });
+}
+
+void inactive_pdo_slots() {
+    Fixture f; auto j = eight_pdo_model();
+    for (const char* direction : {"rpdos", "tpdos"}) {
+        j[direction][1]["mapping"] = xco::Json::array();
+        j[direction][5]["mapping"] = xco::Json::array();
+        j[direction][6]["enabled"] = false;
+        j[direction][7]["mapping"] = xco::Json::array();
+        j[direction][7]["enabled"] = false;
+    }
+    f.model(j); CHECK(f.initialize() == 0); f.start(); operational(f);
+    {
+        std::lock_guard<std::recursive_mutex> lock(f.device->mutex);
+        CHECK(!CO_isError(f.device->co->em, CO_EM_PDO_WRONG_MAPPING));
+        for (size_t i = 0; i < 8; ++i) {
+            const bool enabled = i != 1 && i != 5 && i != 6 && i != 7;
+            CHECK((f.device->co->TPDO[i].PDO_common.valid != 0) == enabled);
+            CHECK((f.device->co->RPDO[i].PDO_common.valid != 0) == enabled);
+        }
+    }
+    for (uint16_t number : {2, 6, 7, 8})
+        CHECK(xnet_canopen_request_tpdo(f.device, number) == XNET_CO_INVALID_STATE);
+    for (uint32_t id : {0x222U, 0x322U}) {
+        CHECK(sdo_download(0x1005, 0, id, 4).Payload[0] == 0x80);
+        CHECK(sdo_download(0x1014, 0, 0x8000008a, 4).Payload[0] == 0x60);
+        CHECK(sdo_download(0x1014, 0, id, 4).Payload[0] == 0x80);
+    }
+    auto configuration = f.bind({{0x1807, 1, 4}, {0x1a07, 0, 1}, {0x1407, 1, 4}, {0x1607, 0, 1}});
+    uint8_t config[10]{}; int32_t statuses[4]{};
+    CHECK(xnet_canopen_read_batch(f.device, configuration, config, sizeof(config), statuses, 4) == 0);
+    CHECK(config[0] == 0x23 && config[1] == 3 && config[3] == 0x80 && config[4] == 0);
+    CHECK(config[5] == 0x23 && config[6] == 2 && config[8] == 0x80 && config[9] == 0);
+    fake::clear_transmitted();
+    fake::inject(0x222, {0x99, 0x88});
+    CHECK(sdo_upload(0x2106) == 0);
+    for (const auto& frame : fake::transmitted())
+        CHECK(frame.Identifier != 0x28a && frame.Identifier != 0x321
+            && frame.Identifier != 0x322 && frame.Identifier != 0x323);
+    CHECK(xnet_canopen_request_tpdo(f.device, 5) == 0);
+    wait_for([] {
+        for (const auto& frame : fake::transmitted())
+            if (frame.Identifier == 0x320 && frame.Payload[0] == 104) return true;
+        return false;
+    });
+    exchange(0, {0x82, 10}, 0x70a, 0); operational(f);
+    CHECK(xnet_canopen_request_tpdo(f.device, 8) == XNET_CO_INVALID_STATE);
+    CHECK(xnet_canopen_stop(f.device) == 0); f.start(); operational(f);
+    CHECK(xnet_canopen_request_tpdo(f.device, 8) == XNET_CO_INVALID_STATE);
+    exchange(0, {0x81, 10}, 0x70a, 0); operational(f);
+    CHECK(xnet_canopen_request_tpdo(f.device, 8) == XNET_CO_INVALID_STATE);
+}
+
+void eighth_synchronous_pdo() {
+    Fixture f; auto j = eight_pdo_model();
+    j["tpdos"][7]["transmission_type"] = 0;
+    j["tpdos"][7]["cob_id"] = 0x43f;
+    j["rpdos"][7]["transmission_type"] = 1;
+    f.model(j); CHECK(f.initialize() == 0); f.start(); operational(f);
+    const auto batch = f.bind({{0x2107, 0, 2}});
+    uint8_t bytes[2]{}; int32_t status;
+    fake::inject(0x223, {0x34, 0x12});
+    CHECK(sdo_upload(0x2107) == 0);
+    fake::clear_transmitted();
+    CHECK(xnet_canopen_request_tpdo(f.device, 8) == 0);
+    fake::inject(0x80, {});
+    wait_for([&] {
+        CHECK(xnet_canopen_read_batch(f.device, batch, bytes, 2, &status, 1) == 0);
+        return bytes[0] == 0x34 && bytes[1] == 0x12;
+    });
+    wait_for([] {
+        for (const auto& frame : fake::transmitted())
+            if (frame.Identifier == 0x43f && frame.Payload[0] == 107) return true;
+        return false;
+    });
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    j["tpdos"][7]["transmission_type"] = 1;
+    f.model(j); CHECK(f.initialize() == 0); f.start(); operational(f);
+    CHECK(xnet_canopen_request_tpdo(f.device, 8) == XNET_CO_INVALID_STATE);
+    fake::clear_transmitted();
+    fake::inject(0x80, {});
+    wait_for([] {
+        for (const auto& frame : fake::transmitted())
+            if (frame.Identifier == 0x43f && frame.Payload[0] == 107) return true;
+        return false;
+    });
 }
 
 void lss_assignment_and_resets() {
@@ -776,6 +994,102 @@ void persistence_atomicity() {
         CHECK(entry.path().filename().string().find(".tmp.") == std::string::npos);
     std::filesystem::remove(target);
 }
+
+class FailingLogSink : public spdlog::sinks::base_sink<std::mutex> {
+    void sink_it_(const spdlog::details::log_msg&) override {
+        throw spdlog::spdlog_ex("injected log write failure");
+    }
+    void flush_() override {}
+};
+
+struct RestoreLogSinks {
+    std::shared_ptr<spdlog::logger> logger;
+    std::vector<spdlog::sink_ptr> original;
+    explicit RestoreLogSinks(std::shared_ptr<spdlog::logger> target)
+        : logger(std::move(target)), original(logger->sinks()) {}
+    ~RestoreLogSinks() { logger->sinks() = std::move(original); }
+};
+
+void file_logging() {
+    Fixture f; CHECK(f.initialize() == 0); f.start(); operational(f);
+    const auto instance = f.device->log_instance;
+    CHECK(xnet_canopen_set_fault(f.device, 0x40, 0x5000, 42, 1) == 0);
+    CHECK(xnet_canopen_set_fault(f.device, 0x40, 0, 0, 0) == 0);
+    fake::inject(0x7e5, {4, 1, 0, 0, 0, 0, 0, 0});
+    CHECK(exchange(0x7e5, {0x11, 19, 0, 0, 0, 0, 0, 0}, 0x7e4, 0x11).Payload[1] == 0);
+    fake::inject(0x7e5, {4, 0, 0, 0, 0, 0, 0, 0});
+    exchange(0, {0x82, 10}, 0x713, 0);
+    wait_for([&] { return f.status().active_node_id == 19; });
+    CHECK(f.device->log_instance == instance);
+    CHECK(xnet_canopen_stop(f.device) == 0);
+
+    // The device is stopped and its tag is immutable during these writes.
+    const auto marker = "concurrent logging check " + std::to_string(xco::Clock::now().time_since_epoch().count());
+    auto messages = [&] {
+        for (int i = 0; i < 50; ++i) f.device->log(xco::LogLevel::info, marker);
+    };
+    std::thread first(messages), second(messages);
+    first.join(); second.join();
+    const std::string long_message(4096, 'z');
+    f.device->log(xco::LogLevel::info, "formatted {} hex=0x{:08x} text={}", 42, 0x1234U, long_message);
+    f.device->log(xco::LogLevel::info, "literal braces: {} {not a format}");
+    int32_t entry_status;
+    uint8_t bytes[1]{};
+    CHECK(xnet_canopen_read_batch(f.device, 0, bytes, 1, &entry_status, 1) == XNET_CO_NOT_FOUND);
+
+    auto read_log = [] {
+        std::ifstream file(XNET_CANOPEN_LOG_PATH);
+        CHECK(file.is_open());
+        return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    };
+    const auto text = read_log();
+    const auto tag = "[device=" + std::to_string(instance)
+        + " interface=CAN1 identity=00000001:00000001:00000001:000003e9 node=";
+    CHECK(text.find(tag + "10 ") != std::string::npos);
+    CHECK(text.find(tag + "19 ") != std::string::npos);
+    CHECK(text.find("NMT Operational") != std::string::npos);
+    CHECK(text.find("fault asserted: bit=0x40 code=0x5000") != std::string::npos);
+    CHECK(text.find("fault cleared: bit=0x40") != std::string::npos);
+    CHECK(text.find("error code=-7: unknown or invalidated batch ID") != std::string::npos);
+    CHECK(text.find("formatted 42 hex=0x00001234 text=" + long_message) != std::string::npos);
+    CHECK(text.find("literal braces: {} {not a format}") != std::string::npos);
+    size_t records = 0, offset = 0;
+    while ((offset = text.find(marker, offset)) != std::string::npos) {
+        ++records; ++offset;
+    }
+    CHECK(records == 100);
+    const std::string rotation_payload(4096, 'x');
+    for (int i = 0; i < 1300; ++i) f.device->log(xco::LogLevel::info, rotation_payload);
+    const std::filesystem::path log_path(XNET_CANOPEN_LOG_PATH);
+    const auto backup = log_path.parent_path() / (log_path.stem().string() + ".1" + log_path.extension().string());
+    CHECK(std::filesystem::exists(backup));
+    CHECK(std::filesystem::file_size(backup) <= 5U * 1024U * 1024U);
+    CHECK(std::filesystem::file_size(log_path) <= 5U * 1024U * 1024U);
+    {
+        RestoreLogSinks restore(f.device->logger);
+        f.device->logger->sinks() = {std::make_shared<FailingLogSink>()};
+        CHECK(xnet_canopen_clear_error(f.device) == 0);
+        f.device->log(xco::LogLevel::info, "this log write fails: {}", 42);
+        CHECK(f.device->error_code == XNET_CO_IO_ERROR);
+        CHECK(diagnostic(f.device).find("injected log write failure") != std::string::npos);
+        f.device->fail(XNET_CO_ACCESS_ERROR, "original operation failure");
+        CHECK(f.device->error_code == XNET_CO_ACCESS_ERROR);
+        const auto failure = diagnostic(f.device);
+        CHECK(failure.find("original operation failure") != std::string::npos
+            && failure.find("file logging failed") != std::string::npos);
+        f.device->fail(XNET_CO_ACCESS_ERROR, long_message);
+        CHECK(f.device->error_code == XNET_CO_ACCESS_ERROR);
+        CHECK(diagnostic(f.device) == std::to_string(XNET_CO_ACCESS_ERROR) + ": "
+            + long_message.substr(0, f.device->error_message.size() - 1));
+    }
+    CHECK(xnet_canopen_clear_error(f.device) == 0);
+    f.device->log(xco::LogLevel::info, "{:{}}", 42, -1);
+    CHECK(f.device->error_code == XNET_CO_IO_ERROR);
+    CHECK(diagnostic(f.device).find("file logging failed") != std::string::npos);
+    CHECK(xnet_canopen_clear_error(f.device) == 0);
+    f.device->log(xco::LogLevel::info, "logging recovered after sink failure");
+    CHECK(read_log().find("logging recovered after sink failure") != std::string::npos);
+}
 }
 
 int main() {
@@ -784,7 +1098,10 @@ int main() {
         {"model validation", model_validation}, {"startup bitrates", startup_bitrates}, {"scalar limits", scalar_limits},
         {"batches and lifecycle", batches_and_lifecycle}, {"partial writes and strings", partial_and_strings},
         {"packed batch buffers", packed_batches}, {"batch argument validation and limits", batch_validation},
-        {"SDO PDO EMCY NMT", protocol_basics}, {"LSS assignment and resets", lss_assignment_and_resets},
+        {"SDO PDO EMCY NMT", protocol_basics},
+        {"eight PDO validation", eight_pdo_validation}, {"eight PDO traffic and lifecycle", eight_pdo_traffic},
+        {"inactive PDO slots", inactive_pdo_slots}, {"eighth synchronous PDO", eighth_synchronous_pdo},
+        {"LSS assignment and resets", lss_assignment_and_resets},
         {"LSS bitrate and persistence", lss_bitrate_and_storage}, {"storage failures", storage_failures},
         {"Reset Node with invalid persistence", reset_with_invalid_persistence},
         {"errors and cleanup", errors_and_cleanup}, {"caller-managed resources", caller_managed_resources},
@@ -792,7 +1109,7 @@ int main() {
         {"synchronous TPDO requests", synchronous_requests}, {"node guarding", node_guarding},
         {"heartbeat and guarding switching", supervision_switching}, {"configurable SYNC and EMCY", configurable_services},
         {"SYNC timers and service validation", sync_configuration_and_validation},
-        {"atomic persistence", persistence_atomicity}};
+        {"atomic persistence", persistence_atomicity}, {"file logging", file_logging}};
     int failed = 0;
     for (const auto& test : tests) {
         try { test.second(); std::cout << "PASS " << test.first << "\n"; }

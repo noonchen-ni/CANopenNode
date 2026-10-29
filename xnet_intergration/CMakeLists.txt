@@ -17,7 +17,7 @@ set(STACK_SOURCES
     "${STACK_ROOT}/301/CO_SYNC.c"
     "${STACK_ROOT}/301/CO_PDO.c"
     "${STACK_ROOT}/305/CO_LSSslave.c")
-set(PORT_SOURCES src/model.cpp src/persistence.cpp src/driver.cpp src/device.cpp)
+set(PORT_SOURCES src/model.cpp src/persistence.cpp src/driver.cpp src/device.cpp src/logging.cpp)
 
 add_library(xnet_canopen_objects OBJECT ${STACK_SOURCES} ${PORT_SOURCES})
 set_target_properties(xnet_canopen_objects PROPERTIES POSITION_INDEPENDENT_CODE ON
@@ -51,9 +51,23 @@ endif()
 
 if(XNET_CANOPEN_BUILD_TESTS)
     enable_testing()
+    if(NOT XNET_CANOPEN_BUILD_LIBRARY)
+        # Mock-only builds must not write to the deployment machine's log path.
+        target_compile_definitions(xnet_canopen_objects PUBLIC
+            XNET_CANOPEN_LOG_PATH="${CMAKE_CURRENT_BINARY_DIR}/xnet_canopen-test.log")
+    endif()
     add_executable(xnet_canopen_tests tests/test_integration.cpp tests/fake_xnet.cpp tests/api_c.c)
     target_link_libraries(xnet_canopen_tests PRIVATE xnet_canopen_objects Threads::Threads)
     target_compile_definitions(xnet_canopen_tests PRIVATE
         XNET_CO_EXAMPLE_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/examples/device.json")
     add_test(NAME xnet_canopen_tests COMMAND xnet_canopen_tests)
+    add_executable(xnet_canopen_logging_tests tests/test_logging.cpp src/logging.cpp)
+    target_compile_features(xnet_canopen_logging_tests PRIVATE cxx_std_17)
+    target_include_directories(xnet_canopen_logging_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${STACK_ROOT}")
+    target_compile_definitions(xnet_canopen_logging_tests PRIVATE
+        XNET_CANOPEN_LOG_PATH="${CMAKE_CURRENT_BINARY_DIR}/logging-open-failure")
+    target_link_libraries(xnet_canopen_logging_tests PRIVATE Threads::Threads)
+    add_test(NAME xnet_canopen_logging_tests COMMAND xnet_canopen_logging_tests)
 endif()

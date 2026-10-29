@@ -84,6 +84,8 @@ Reset Communication restores communication defaults and retains application
 values and pending LSS settings. Reset Node restores all OD defaults and reloads
 saved/startup LSS settings. Both rebuild services without changing the host
 handle or OD structure; batch access resolves current extensions each call.
+Successful protocol resets increment separate counters in `get_status()`, so
+the external model need not infer reset identity from a transient NMT state.
 
 Uninitialize releases sessions, OD, and stack and invalidates
 all batch IDs. IDs are not reused within a handle. Diagnostics survive until
@@ -261,7 +263,8 @@ Binding uses three numeric arrays: uint16 indices, uint8 subindices, and uint32
 sizes. Each has `count` elements. In LabVIEW configure these as numeric arrays
 passed by **Array Data Pointer**, not array handles or arrays of clusters.
 Validate array lengths before calling: C receives pointers, not array dimensions.
-The status descriptor has eight uint32 fields (32 bytes).
+The `get_status()` descriptor has ten uint32 fields (40 bytes); it is separate
+from the per-entry int32 status array returned by batch operations.
 
 `bind_batch()` copies the arrays and validates exact OD lengths, distinct OD
 addresses, <=4096 bindings, and a total size <=1 MiB. Values occupy consecutive
@@ -322,7 +325,8 @@ Use a nonzero CANopen error code when asserting a fault. The stack generates EMC
 and updates error state/history; host API failures do not automatically emit EMCY.
 
 Every operation returns a status from the public header. `get_status()` exposes
-runtime/NMT state, active/pending LSS values, CAN error flags, and
+runtime/NMT state, active/pending LSS values, separate reset-completion counters, and
+CAN error flags, plus
 `node_guarding_timeout` (0 or 1). The timeout clears on a new guarding request,
 disabled monitoring, enabled heartbeat, or stack restart/reset. It is a current
 condition, not an event history. The external model decides the drive reaction
@@ -330,9 +334,63 @@ condition, not an event history. The external model decides the drive reaction
 The stack reports/clears the guarding communication error and emits EMCY subject
 to its NMT/producer rules.
 
-`node_guarding_timeout` replaces the previously reserved final uint32 in the
-status structure. Its size remains 32 bytes and the field is at byte offset 28;
-update C field references and the meaning of that word in LabVIEW descriptors.
+### Status snapshot and reset notification
+
+`get_status()` remains the single read-only runtime/protocol information API.
+It needs no batch binding, JSON configuration, or extra network-visible OD
+entries. All fields are copied under the same runtime lock.
+
+| Byte offset | uint32 field | Meaning |
+| --- | --- | --- |
+| 0 | `runtime_state` | Host library lifecycle state. |
+| 4 | `nmt_state` | Current CANopen NMT state, not the CiA 402 drive state. |
+| 8 | `active_node_id` | Active node ID. |
+| 12 | `pending_node_id` | LSS-selected node ID. |
+| 16 | `active_bitrate_kbps` | Applied interface bitrate. |
+| 20 | `pending_bitrate_kbps` | LSS-selected bitrate. |
+| 24 | `can_error_status` | Stack CAN error bitmask. |
+| 28 | `node_guarding_timeout` | Current life-guard timeout condition, 0 or 1. |
+| 32 | `reset_node_count` | Successfully completed Reset Node operations. |
+| 36 | `reset_communication_count` | Successfully completed Reset Communication operations. |
+
+**ABI change:** the structure is now 40 bytes, previously 32. The original eight
+fields retain their offsets; `node_guarding_timeout` remains at offset 28.
+Rebuild C callers and enlarge LabVIEW Call Library Function Node output
+descriptors to ten uint32 fields before using the updated library. The function
+has no output-size parameter and cannot safely accept an old 32-byte buffer.
+
+Reset counters are stored outside the OD and stack. Each increments only after
+the reset restores the required OD values, rebuilds services, and successfully
+restarts sessions. This reports local reset completion, not confirmation that a
+boot-up frame has reached the bus. A Reset Node increments only its own counter;
+its communication reinitialization does not also increment the communication
+counter. Stack-requested protocol resets use the same path, including LSS
+commissioning when it requests a communication reset.
+
+Both counters start at zero. Successful `initialize()` clears them; failed
+initialize attempts do not. They survive protocol resets, host stop/start,
+uninitialize, and runtime failure. Without a stack, the retained counters and
+runtime state remain readable while the other fields are zero. Neither polling
+nor `clear_error()` clears them, and ordinary initialization/start/stop does not
+count as a protocol reset. Counters are not persisted across destroyed handles.
+
+At model startup, record a baseline. Each model step compares both counters
+against the previous snapshot: Reset Node normally requires reinitializing the
+external controller consistently with application OD defaults; Reset
+Communication preserves application state. The library does not reset the
+external model or implement CiA 402 behavior. Each counter wraps modulo 2^32;
+uint32 subtraction gives the number of completions modulo 2^32. Separate counters
+retain both reset types between reads but do not preserve their chronological
+order. A full wrap between reads cannot be distinguished from no change.
+
+Status and OD batch calls are separately synchronized. For a consistent
+read-only model input sample, read status, read the input batch, then read status
+again. If either counter changed, discard/retry the input sample and handle the
+reset. This is not a transaction around model execution/feedback writes: a reset
+can still occur between the final check and a feedback write. Check runtime and
+batch results as well, especially after reset failures. Current NMT state and
+guarding timeout are snapshots, not lossless transition histories.
+
 Hardware bus-off/error counters feed the stack's CAN error status. Overflow flags
 are latched until stack restart/reset so losses remain visible.
 
@@ -340,7 +398,7 @@ Operation results use `XNET_CO_*` (`XNET_CO_OK`, `XNET_CO_INVALID_STATE`, etc.).
 The separate `runtime_state` field uses `XNET_CO_RUNTIME_UNINITIALIZED`,
 `XNET_CO_RUNTIME_STOPPED`, `XNET_CO_RUNTIME_RUNNING`, and `XNET_CO_RUNTIME_FAILED`.
 These runtime names replace the initial `XNET_CO_UNINITIALIZED/STOPPED/RUNNING/FAILED`
-names; their numeric values (0..3) and the binary ABI are unchanged.
+names; their numeric values (0..3) are unchanged.
 Neither runtime state nor API results are CANopen NMT state or CAN error bitmasks.
 The public header documents each enum value, structure field, and API contract.
 
@@ -462,7 +520,11 @@ synchronous manual requests. Additional groups cover guarding RTR filtering and
 toggle replies, life-time timeout/recovery, heartbeat/guarding switching,
 configurable SYNC/EMCY, collision/overflow rejection, SYNC timers/counters, and
 communication-setting retention/reset. A C source verifies the public header,
-32-byte status layout and guarding-status offset.
+40-byte status layout, unchanged guarding-status offset, and appended reset
+counter offsets. Reset-status groups cover completion counts, preserved/reset
+application values, repeated/broadcast commands, ordinary NMT state changes,
+stop/start, teardown/reinitialization, failed resets/initialization and uint32
+wraparound.
 Eight-PDO groups cover all eight transmit/receive paths, ninth-slot rejection,
 explicit-ID requirements, higher-slot collisions (including live SYNC/EMCY writes),
 empty/disabled slots, synchronous PDO8, stop/start, NMT resets and LSS node changes.

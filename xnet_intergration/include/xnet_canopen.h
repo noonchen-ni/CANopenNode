@@ -57,9 +57,26 @@ enum {
 };
 
 /**
- * Synchronized 32-byte status snapshot, represented by eight consecutive uint32s.
- * Fields other than runtime_state are zero before initialization. The final word
- * replaces the former reserved field without changing the structure's size.
+ * Synchronized 40-byte status snapshot, represented by ten consecutive uint32s.
+ * The first eight fields retain their previous offsets; the two reset counters
+ * are appended at byte offsets 32 and 36. This extends the former 32-byte ABI:
+ * rebuild C callers and enlarge LabVIEW output descriptors before calling.
+ * get_status has no output-size argument and cannot detect an old/small buffer.
+ *
+ * Reset counters belong to the handle, not to the resettable Object Dictionary.
+ * Each counts successful protocol-reset completions, not requests or boot-up
+ * frames. Reset Node increments only reset_node_count, even though it also
+ * reinitializes communication. Failed resets, ordinary initialization, and host
+ * stop/start do not increment either counter.
+ *
+ * Both counters start at zero and clear only on successful initialize. They
+ * survive protocol resets, stop/start, uninitialize, and failed initialize
+ * attempts. All fields are zero on a newly created handle; without a stack,
+ * fields other than runtime_state and the retained counters are zero.
+ * Unsigned counters wrap modulo 2^32. Compare against the previous snapshot to
+ * detect resets; uint32 subtraction gives the count modulo 2^32, not event order.
+ * A full wrap between reads is indistinguishable from no change. Establish a
+ * new baseline after initialization; values are not persisted across handles.
  *
  * node_guarding_timeout is a current condition, not a latched event history.
  * A new guarding request, disabled monitoring, enabled heartbeat, or stack
@@ -75,6 +92,8 @@ typedef struct {
     uint32_t pending_bitrate_kbps; /**< LSS-configured bitrate, applied by activation. */
     uint32_t can_error_status;     /**< CANopenNode CO_CAN_ERR_* bitmask, not an API result. */
     uint32_t node_guarding_timeout; /**< 1 while life guarding has timed out; otherwise 0. */
+    uint32_t reset_node_count;     /**< Completed Reset Node operations; application OD defaults were restored. */
+    uint32_t reset_communication_count; /**< Completed Reset Communication operations; application OD values were retained. */
 } xnet_canopen_status_t;
 
 /**
@@ -203,7 +222,19 @@ XNET_CANOPEN_API int32_t xnet_canopen_set_fault(
     xnet_canopen_handle handle, uint8_t error_bit, uint16_t error_code,
     uint32_t info_code, uint8_t active);
 
-/** Copy a synchronized status snapshot to a required output, even before initialization or after failure. */
+/**
+ * Copy a read-only, synchronized snapshot, even before initialization or after
+ * failure. Reading does not acknowledge/clear counters or the guarding condition.
+ * Counters, NMT state, and guarding status are sampled under the same runtime
+ * lock. Current state/timeout are not a history of intermediate transitions.
+ *
+ * The external model interprets reset counters; this call does not reset its
+ * state or implement CiA 402 behavior. OD batch calls are separately locked:
+ * a reset may occur between status and batch calls. For a read-only input
+ * snapshot, bracket the batch read with status reads and discard/retry if either
+ * reset counter changed. This does not make later feedback writes atomic with
+ * the snapshot or prevent a reset between the final check and a write.
+ */
 XNET_CANOPEN_API int32_t xnet_canopen_get_status(
     xnet_canopen_handle handle, xnet_canopen_status_t* status);
 

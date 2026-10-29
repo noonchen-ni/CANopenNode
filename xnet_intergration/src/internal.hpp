@@ -171,6 +171,13 @@ struct xnet_canopen_device {
     std::thread worker; /**< Protocol/frame-processing thread; joined before releasing its resources. */
     std::atomic<bool> stop_requested{false}; /**< Shutdown request visible even when the worker releases mutex. */
     uint32_t state = XNET_CO_RUNTIME_UNINITIALIZED; /**< XNET_CO_RUNTIME_* lifecycle state, not NMT state. */
+    /**
+     * Runtime-lock-protected completion counters, kept outside Model/CO_t so
+     * restoring OD defaults or rebuilding the stack cannot erase notification.
+     * Reset only after successful initialize, not during release/failure cleanup.
+     */
+    uint32_t reset_node_count = 0;
+    uint32_t reset_communication_count = 0;
     int32_t error_code = 0; /**< Latest per-handle XNET_CO_* diagnostic code; 0 when cleared. */
     std::array<char, 2048> error_message{}; /**< NUL-terminated diagnostic text, truncated to fit. */
     const uint64_t log_instance = xco::next_log_instance(); /**< Process-local handle identity, stable across LSS/reset. */

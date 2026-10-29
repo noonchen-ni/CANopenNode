@@ -719,6 +719,116 @@ void reset_with_invalid_persistence() {
     CHECK(diagnostic(f.device).find(std::to_string(XNET_CO_IO_ERROR) + ": ") == 0);
 }
 
+void reset_status_lifecycle() {
+    Fixture f;
+    auto check_counts = [&](uint32_t node, uint32_t communication) {
+        const auto status = f.status();
+        CHECK(status.reset_node_count == node && status.reset_communication_count == communication);
+    };
+    const auto fresh = f.status();
+    CHECK(fresh.runtime_state == XNET_CO_RUNTIME_UNINITIALIZED && fresh.nmt_state == 0
+        && fresh.node_guarding_timeout == 0);
+    check_counts(0, 0);
+    CHECK(xnet_canopen_get_status(f.device, nullptr) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(f.initialize() == 0); check_counts(0, 0);
+    f.start(); operational(f); check_counts(0, 0);
+    const auto batch = f.bind({{0x2000, 0, 2}});
+    uint8_t bytes[2]{77, 0}; int32_t entry_status;
+    CHECK(xnet_canopen_write_batch(f.device, batch, bytes, 2, &entry_status, 1) == 0);
+
+    exchange(0, {0x82, 10}, 0x70a, 0);
+    auto status = f.status();
+    CHECK(status.reset_node_count == 0 && status.reset_communication_count == 1
+        && status.nmt_state == CO_NMT_PRE_OPERATIONAL && status.node_guarding_timeout == 0);
+    CHECK(xnet_canopen_read_batch(f.device, batch, bytes, 2, &entry_status, 1) == 0 && bytes[0] == 77);
+    exchange(0, {0x81, 10}, 0x70a, 0);
+    status = f.status();
+    CHECK(status.reset_node_count == 1 && status.reset_communication_count == 1
+        && status.nmt_state == CO_NMT_PRE_OPERATIONAL);
+    CHECK(xnet_canopen_read_batch(f.device, batch, bytes, 2, &entry_status, 1) == 0 && bytes[0] == 0);
+    for (int i = 0; i < 3; ++i) check_counts(1, 1);
+    exchange(0, {0x82, 0}, 0x70a, 0); check_counts(1, 2);
+    exchange(0, {0x82, 10}, 0x70a, 0); check_counts(1, 3);
+    exchange(0, {0x81, 0}, 0x70a, 0); check_counts(2, 3);
+
+    fake::inject(0, {0x81, 11});
+    CHECK(sdo_upload(0x1000) == 0); check_counts(2, 3);
+    operational(f);
+    fake::inject(0, {2, 10});
+    wait_for([&] { return f.status().nmt_state == CO_NMT_STOPPED; });
+    fake::inject(0, {0x80, 10});
+    wait_for([&] { return f.status().nmt_state == CO_NMT_PRE_OPERATIONAL; });
+    check_counts(2, 3);
+    CHECK(xnet_canopen_start(f.device) == 0); check_counts(2, 3);
+    CHECK(xnet_canopen_stop(f.device) == 0); check_counts(2, 3);
+    CHECK(xnet_canopen_stop(f.device) == 0);
+    f.start(); check_counts(2, 3);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    status = f.status();
+    CHECK(status.runtime_state == XNET_CO_RUNTIME_UNINITIALIZED && status.nmt_state == 0
+        && status.node_guarding_timeout == 0);
+    check_counts(2, 3);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0); check_counts(2, 3);
+    fake::fail_next("create_output", nxErrInternalError);
+    CHECK(f.initialize() == XNET_CO_XNET_ERROR); check_counts(2, 3);
+    CHECK(f.initialize() == 0); check_counts(0, 0);
+    f.start(); check_counts(0, 0);
+}
+
+void failed_reset_status() {
+    for (const uint8_t command : {0x81, 0x82}) {
+        for (const char* operation : {"stop", "start"}) {
+            Fixture f; CHECK(f.initialize() == 0); f.start();
+            exchange(0, {0x81, 10}, 0x70a, 0);
+            exchange(0, {0x82, 10}, 0x70a, 0);
+            fake::fail_next(operation, nxErrInternalError);
+            fake::inject(0, {command, 10});
+            wait_for([&] { return f.status().runtime_state == XNET_CO_RUNTIME_FAILED; });
+            const auto failed = f.status();
+            CHECK(failed.reset_node_count == 1 && failed.reset_communication_count == 1);
+            CHECK(diagnostic(f.device).find("fake XNET error") != std::string::npos);
+            CHECK(xnet_canopen_uninitialize(f.device) == 0);
+            CHECK(f.status().reset_node_count == 1 && f.status().reset_communication_count == 1);
+            CHECK(f.initialize() == 0);
+            CHECK(f.status().reset_node_count == 0 && f.status().reset_communication_count == 0);
+        }
+    }
+}
+
+void reset_status_wraparound() {
+    Fixture f; CHECK(f.initialize() == 0); f.start();
+    {
+        std::lock_guard<std::recursive_mutex> lock(f.device->mutex);
+        f.device->reset_node_count = UINT32_MAX;
+        f.device->reset_communication_count = UINT32_MAX;
+    }
+    exchange(0, {0x82, 10}, 0x70a, 0);
+    auto status = f.status();
+    CHECK(status.reset_node_count == UINT32_MAX && status.reset_communication_count == 0);
+    exchange(0, {0x81, 10}, 0x70a, 0);
+    status = f.status();
+    CHECK(status.reset_node_count == 0 && status.reset_communication_count == 0);
+}
+
+void reset_status_before_bootup_transmission() {
+    Fixture f; CHECK(f.initialize() == 0); f.start();
+    fake::clear_transmitted();
+    fake::output_full(true);
+    fake::inject(0, {0x81, 10});
+    wait_for([&] { return f.status().reset_node_count == 1; });
+    const auto status = f.status();
+    CHECK(status.runtime_state == XNET_CO_RUNTIME_RUNNING && status.reset_communication_count == 0
+        && status.active_node_id == 10 && status.node_guarding_timeout == 0);
+    CHECK(fake::transmitted().empty());
+    fake::output_full(false);
+    wait_for([] {
+        for (const auto& frame : fake::transmitted())
+            if (frame.Identifier == 0x70a && frame.PayloadLength == 1 && frame.Payload[0] == 0) return true;
+        return false;
+    });
+    CHECK(f.status().reset_node_count == 1);
+}
+
 void errors_and_cleanup() {
     Fixture f;
     fake::fail_next("create_output", nxErrInternalError);
@@ -1104,6 +1214,9 @@ int main() {
         {"LSS assignment and resets", lss_assignment_and_resets},
         {"LSS bitrate and persistence", lss_bitrate_and_storage}, {"storage failures", storage_failures},
         {"Reset Node with invalid persistence", reset_with_invalid_persistence},
+        {"reset status lifecycle", reset_status_lifecycle}, {"failed reset status", failed_reset_status},
+        {"reset status wraparound", reset_status_wraparound},
+        {"reset status before boot-up transmission", reset_status_before_bootup_transmission},
         {"errors and cleanup", errors_and_cleanup}, {"caller-managed resources", caller_managed_resources},
         {"queues and filtering", queues_and_filtering}, {"concurrent channels", concurrent_channels},
         {"synchronous TPDO requests", synchronous_requests}, {"node guarding", node_guarding},

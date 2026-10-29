@@ -243,6 +243,12 @@ void xnet_canopen_device::reset_stack(bool reset_all_objects) {
     setup_stack();
     adapter.start();
     CO_CANsetNormalMode(co->CANmodule);
+    // Publish completion only after all fallible reset work succeeds. The worker
+    // holds mutex here, so status cannot see the restored OD/new stack with an
+    // old completion count. Reset Node is one operation, not an additional
+    // Reset Communication notification. Unsigned overflow intentionally wraps.
+    if (reset_all_objects) ++reset_node_count;
+    else ++reset_communication_count;
     log(xco::LogLevel::info, "CANopen reset completed");
 }
 
@@ -471,6 +477,10 @@ int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interfac
             d.model->restore(true, d.pending_node);
             d.adapter.open(d.interface_name, d.active_bitrate);
             d.setup_stack();
+            // Commit a new counting lifetime only after initialization succeeds;
+            // failed attempts must preserve the previous lifetime's counts.
+            d.reset_node_count = 0;
+            d.reset_communication_count = 0;
             d.state = XNET_CO_RUNTIME_STOPPED;
             d.log(xco::LogLevel::info, "device initialized; communication not started");
         } catch (const std::exception& original) {
@@ -637,6 +647,10 @@ int32_t xnet_canopen_get_status(xnet_canopen_handle handle, xnet_canopen_status_
         require(status != nullptr, XNET_CO_INVALID_ARGUMENT, "status output is required");
         *status = {};
         status->runtime_state = d.state;
+        // These survive stack teardown and remain readable after worker failure
+        // or uninitialize. call() holds the same mutex used to complete resets.
+        status->reset_node_count = d.reset_node_count;
+        status->reset_communication_count = d.reset_communication_count;
         if (d.co) {
             status->nmt_state = CO_NMT_getInternalState(d.co->NMT);
             status->can_error_status = d.co->CANmodule->CANerrorStatus;

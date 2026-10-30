@@ -35,7 +35,7 @@ endif()
 
 if(XNET_CANOPEN_BUILD_LIBRARY)
     if(NOT XNET_LIBRARY)
-        find_library(XNET_LIBRARY_FOUND NAMES nixnet)
+        find_library(XNET_LIBRARY_FOUND NAMES nixnet PATHS /usr/lib/x86_64-linux-gnu)
         if(NOT XNET_LIBRARY_FOUND)
             message(FATAL_ERROR "Set XNET_LIBRARY to the target NI-XNET library, or disable XNET_CANOPEN_BUILD_LIBRARY for mock tests")
         endif()

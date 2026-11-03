@@ -1,0 +1,1927 @@
+{
+  "schema_version": 1,
+  "node_id": "{USER_INPUT}",
+  "bitrate_kbps": "{USER_INPUT}",
+  "worker_period_us": "{USER_INPUT}",
+  "identity": {
+    "vendor_id": 768,
+    "product_code": 17988,
+    "revision_number": 0,
+    "serial_number": "{USER_INPUT}"
+  },
+  "device_type": 131474,
+  "heartbeat_ms": 0,
+  "node_guarding": {
+    "guard_time_ms": 1000,
+    "life_time_factor": 3
+  },
+  "sync": {
+    "cob_id": 128,
+    "period_us": 2000,
+    "window_us": 0,
+    "counter_overflow": 0
+  },
+  "emcy": {
+    "cob_id": 128,
+    "cob_id_offset": "NODE_ID",
+    "inhibit_100us": 0
+  },
+  "objects": [
+    {
+      "index": "0x2010",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 31,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED16",
+          "value": 65535,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED16",
+          "value": 1,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "UNSIGNED16",
+          "value": 2,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "UNSIGNED16",
+          "value": 4,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "UNSIGNED16",
+          "value": 8,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 7,
+          "type": "UNSIGNED16",
+          "value": 16,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 8,
+          "type": "UNSIGNED16",
+          "value": 32,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 9,
+          "type": "UNSIGNED16",
+          "value": 64,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 10,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "tx",
+          "local_write": true
+        },
+        {
+          "subindex": 11,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 12,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 13,
+          "type": "UNSIGNED16",
+          "value": 65535,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 14,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 15,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 16,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 17,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 18,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 19,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 20,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "tx",
+          "local_write": true
+        },
+        {
+          "subindex": 21,
+          "type": "UNSIGNED16",
+          "value": 32,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 22,
+          "type": "UNSIGNED16",
+          "value": 32,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 29,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 30,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 31,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x2501",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 13,
+          "access": "ro"
+        },
+        {
+          "subindex": 4,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 7,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 8,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 9,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 10,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 11,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 12,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 13,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x2502",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 16,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED16",
+          "value": 3,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "UNSIGNED16",
+          "value": 3,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 7,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 8,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 9,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 10,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 11,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 12,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 13,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 14,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 15,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "tx",
+          "local_write": true
+        },
+        {
+          "subindex": 16,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "tx",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x2508",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 15,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "INTEGER16",
+          "value": 1000,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED16",
+          "value": 1000,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "UNSIGNED16",
+          "value": 3,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 7,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 8,
+          "type": "UNSIGNED16",
+          "value": 600,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 9,
+          "type": "UNSIGNED16",
+          "value": 10,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 10,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 12,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "tx",
+          "local_write": true
+        },
+        {
+          "subindex": 13,
+          "type": "INTEGER16",
+          "value": 1000,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 15,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x2601",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x2602",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x2680",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x2F81",
+      "type": "UNSIGNED8",
+      "value": 50,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x2FE0",
+      "type": "UNSIGNED16",
+      "value": 270,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x2FE2",
+      "type": "UNSIGNED16",
+      "value": 540,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x2FF0",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 3,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x3011",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 4,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED8",
+          "value": 2,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x6004",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x6007",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x603F",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x6040",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6041",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x605A",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x605B",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x605C",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x605D",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x605E",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x6060",
+      "type": "INTEGER8",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6061",
+      "type": "INTEGER8",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x6063",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x6064",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x6065",
+      "type": "UNSIGNED32",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6067",
+      "type": "UNSIGNED32",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x6068",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x606B",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x606C",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x6071",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6072",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x6073",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6075",
+      "type": "UNSIGNED32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x6076",
+      "type": "UNSIGNED32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x6077",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x6078",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x6079",
+      "type": "UNSIGNED32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x607A",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x607C",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x607D",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 2,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x607E",
+      "type": "UNSIGNED8",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x607F",
+      "type": "UNSIGNED32",
+      "value": 89478484,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6080",
+      "type": "UNSIGNED16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x6081",
+      "type": "UNSIGNED32",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6083",
+      "type": "UNSIGNED32",
+      "value": 100000,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6084",
+      "type": "UNSIGNED32",
+      "value": 100000,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6085",
+      "type": "UNSIGNED32",
+      "value": 100000,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x6098",
+      "type": "INTEGER8",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6099",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 6,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED32",
+          "value": 819200,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x609A",
+      "type": "UNSIGNED32",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x60C0",
+      "type": "INTEGER16",
+      "value": 0,
+      "access": "rw",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x60C1",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 2,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x60C2",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 2,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED8",
+          "value": 1,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "INTEGER8",
+          "value": -3,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x60C3",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 2,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED8",
+          "value": 1,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x60C4",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 6,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED32",
+          "value": 1,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "UNSIGNED8",
+          "value": 1,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x60F4",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "none",
+      "local_write": true
+    },
+    {
+      "index": "0x60F6",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 13,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 7,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 8,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "both",
+          "local_write": true
+        },
+        {
+          "subindex": 9,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 10,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 11,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 12,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 13,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x60F9",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 10,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 7,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 8,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 9,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 10,
+          "type": "INTEGER32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x60FB",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 5,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x60FC",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x60FD",
+      "type": "UNSIGNED32",
+      "value": 0,
+      "access": "ro",
+      "pdo": "tx",
+      "local_write": true
+    },
+    {
+      "index": "0x60FF",
+      "type": "INTEGER32",
+      "value": 0,
+      "access": "rw",
+      "pdo": "both",
+      "local_write": true
+    },
+    {
+      "index": "0x6410",
+      "kind": "record",
+      "members": [
+        {
+          "subindex": 0,
+          "type": "UNSIGNED8",
+          "value": 22,
+          "access": "ro"
+        },
+        {
+          "subindex": 1,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 2,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 3,
+          "type": "UNSIGNED32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 4,
+          "type": "UNSIGNED32",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 5,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 6,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 7,
+          "type": "INTEGER16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 8,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 9,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 10,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 11,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 12,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 13,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 14,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 15,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 16,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 17,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 18,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 19,
+          "type": "UNSIGNED8",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 20,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 21,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "rw",
+          "pdo": "none",
+          "local_write": true
+        },
+        {
+          "subindex": 22,
+          "type": "UNSIGNED16",
+          "value": 0,
+          "access": "ro",
+          "pdo": "none",
+          "local_write": true
+        }
+      ]
+    },
+    {
+      "index": "0x6504",
+      "type": "VISIBLE_STRING",
+      "value": "Kinco Electric (Shenzhen) Ltd.",
+      "access": "ro",
+      "size": 31,
+      "pdo": "none",
+      "local_write": true
+    }
+  ],
+  "rpdos": [
+    {
+      "cob_id": 512,
+      "cob_id_offset": "NODE_ID",
+      "enabled": true,
+      "transmission_type": 254,
+      "event_ms": 0,
+      "mapping": [
+        {
+          "index": "0x607A",
+          "subindex": 0
+        },
+        {
+          "index": "0x6060",
+          "subindex": 0
+        },
+        {
+          "index": "0x6040",
+          "subindex": 0
+        }
+      ]
+    },
+    {
+      "cob_id": 768,
+      "cob_id_offset": "NODE_ID",
+      "enabled": true,
+      "transmission_type": 254,
+      "event_ms": 0,
+      "mapping": [
+        {
+          "index": "0x6081",
+          "subindex": 0
+        },
+        {
+          "index": "0x60FF",
+          "subindex": 0
+        }
+      ]
+    },
+    {
+      "cob_id": 1024,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 254,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 1280,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 254,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 576,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 254,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 832,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 254,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 1088,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 254,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 1344,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 254,
+      "event_ms": 0,
+      "mapping": []
+    }
+  ],
+  "tpdos": [
+    {
+      "cob_id": 384,
+      "cob_id_offset": "NODE_ID",
+      "enabled": true,
+      "transmission_type": 0,
+      "inhibit_100us": 0,
+      "event_ms": 0,
+      "mapping": [
+        {
+          "index": "0x6041",
+          "subindex": 0
+        },
+        {
+          "index": "0x6063",
+          "subindex": 0
+        },
+        {
+          "index": "0x6061",
+          "subindex": 0
+        }
+      ]
+    },
+    {
+      "cob_id": 640,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 0,
+      "inhibit_100us": 0,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 896,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 0,
+      "inhibit_100us": 0,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 1152,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 0,
+      "inhibit_100us": 0,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 448,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 0,
+      "inhibit_100us": 0,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 704,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 0,
+      "inhibit_100us": 0,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 960,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 0,
+      "inhibit_100us": 0,
+      "event_ms": 0,
+      "mapping": []
+    },
+    {
+      "cob_id": 1216,
+      "cob_id_offset": "NODE_ID",
+      "enabled": false,
+      "transmission_type": 0,
+      "inhibit_100us": 0,
+      "event_ms": 0,
+      "mapping": []
+    }
+  ]
+}

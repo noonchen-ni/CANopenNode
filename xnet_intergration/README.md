@@ -1,5 +1,7 @@
 # NI-XNET CANopen device simulator
 
+English | [简体中文](README.zh-CN.md)
+
 This is a C++17 shared-library wrapper around the existing CANopenNode C stack,
 intended for NI Linux RT ARM64 and a VeriStand Custom Device. All integration
 sources are in this directory. No existing CANopenNode source files are changed.

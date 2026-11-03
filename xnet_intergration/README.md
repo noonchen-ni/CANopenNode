@@ -1,4 +1,4 @@
-# NI-XNET CANopen simulator: first edition
+# NI-XNET CANopen device simulator
 
 This is a C++17 shared-library wrapper around the existing CANopenNode C stack,
 intended for NI Linux RT ARM64 and a VeriStand Custom Device. All integration
@@ -8,18 +8,123 @@ Each handle owns one simulated device, one physical XNET interface, two raw
 frame-stream sessions, one runtime Object Dictionary, and one processing worker.
 The library owns all frame I/O. A CAN database is not needed by XNET.
 
+This README is the maintenance and design reference for the integration. The
+[public C header](include/xnet_canopen.h) defines the exact API contracts;
+the implementation and tests define supported behavior. Historical API sketches,
+implementation progress reports, and superseded design discussions are not part
+of this guide.
+
+## Contents
+
+- [Design background and responsibility boundaries](#design-background-and-responsibility-boundaries)
+- [Files](#files)
+- [Build](#build)
+- [Lifecycle and ownership](#lifecycle-and-ownership)
+- [JSON model version 1](#json-model-version-1)
+- [Batch ABI](#batch-abi)
+- [TPDO, faults, and errors](#tpdo-faults-and-errors)
+- [File logging](#file-logging)
+- [LSS and persistent configuration](#lss-and-persistent-configuration)
+- [External device-model integration](#external-device-model-integration)
+- [Kinco configuration and compatibility notes](#kinco-configuration-and-compatibility-notes)
+- [Maintaining and extending the integration](#maintaining-and-extending-the-integration)
+- [Validation and limits](#validation-and-limits)
+
+## Design background and responsibility boundaries
+
+The purpose is to simulate a CANopen controlled node for an external master,
+with VeriStand supplying application behavior and channels. CANopenNode provides
+communication, not a motor/plant model or a CiA 402 state machine. Adding drive
+objects or importing an EDS does not implement drive behavior. Host runtime state,
+CANopen NMT state, and CiA 402 drive state are three separate concepts:
+NMT Operational does not mean a drive is Operation Enabled.
+
+```text
+External CANopen master
+    <-> classic CAN bus <-> NI hardware / NI-XNET
+    <-> library-owned adapter / CANopenNode / runtime OD
+    <-> C batch, status, TPDO-request and fault APIs
+    <-> VeriStand adapter / channels
+    <-> external device / CiA 402 / plant model
+```
+
+| Layer | Responsibility |
+| --- | --- |
+| NI-XNET adapter | Own two raw frame-stream sessions on one physical interface; receive/filter frames, queue output, apply bitrate changes, and expose bus/queue failures. |
+| CANopenNode integration | NMT, SDO server, fixed RPDO/TPDO, heartbeat or node/life guarding, SYNC consumer, EMCY producer, LSS slave, OD storage, lifecycle and status. |
+| Provisioning / channel manifest | Generate versioned JSON before initialization; describe OD addresses, types, permissions, raw defaults, fixed PDO layout and channel encoding from one consistent model. |
+| VeriStand adapter / external model | Schedule model execution, interpret commands, implement selected device modes, motion, I/O priority, scaling, feedback, alarms and fault-reset behavior. |
+| Optional device-specific handlers | Interpret vendor commands only when selected by the test contract; use generic integration hooks where needed rather than embedding Kinco meanings in the communication core. |
+
+Important design choices:
+
+- The deployment target is **NI Linux RT ARM64**. Windows and Linux x86-64
+  mock builds are development tools, not deployment/hardware certification.
+- Each handle owns one device and one interface. LabVIEW holds the handle, not
+  XNET sessions, and does not pass frames or call a protocol-processing step.
+  Interface/path exclusivity is caller-managed, not enforced by a library registry.
+- Construct the OD once at initialization, rather than generating C for each
+  customer or resizing it while running. Values can change, but descriptor and
+  storage addresses must stay stable until uninitialization.
+- PDO mappings, enable state and communication records are fixed per
+  initialization. Configure the master not to depend on startup SDO writes to
+  those records. Live SYNC/EMCY/guarding settings are separate supported features.
+- VeriStand access is normally 1000 Hz, with synchronized latest-value exchange.
+  The contract does not promise every command edge, next-cycle application, or
+  same-SYNC-cycle feedback. CAN traffic rate and channel polling rate are independent.
+- Full LSS slave integration includes adapter bitrate activation and file-backed
+  storage, not merely node-ID assignment. Unsupported operations and failures
+  must not be acknowledged as successful.
+- No hard real-time deadline is promised. A previously observed XNET
+  write-to-send latency of about 200 us was a measurement under particular
+  conditions, not a worst-case bound or total model-to-wire latency.
+
+### CANopen concepts needed for maintenance
+
+This port uses classic CAN: standard 11-bit identifiers and at most eight payload
+bytes, not CANopen FD or 29-bit frames. An OD address is a 16-bit index plus an
+8-bit subindex, for example `0x1018:01` (vendor ID). OD values remain local unless
+accessed through a protocol service or the host API.
+
+| Service | Local simulated-device role |
+| --- | --- |
+| SDO | Server answering remote OD reads/writes; no SDO client is needed to answer a master. |
+| PDO | TPDO producer and RPDO consumer, named from the simulated node's perspective. |
+| NMT | Controlled node; Pre-operational allows SDO but not Operational PDO exchange. |
+| Heartbeat / guarding | Heartbeat producer or guarding slave; no heartbeat consumer/guarding master. |
+| SYNC / EMCY / LSS | SYNC consumer, EMCY producer and LSS slave. |
+
+One XNET stream session carries many protocol CAN IDs; a PDO is not a session.
+TPDO/RPDO numbers are local slot numbers, not bus-wide identifiers. A producer
+and consumer must agree on CAN ID and payload layout; their local PDO numbers
+and OD addresses need not match. Normally only one producer uses a given PDO ID.
+
+An SDO transfer can span frames: expedited transfers carry up to four value
+bytes, segmented transfers use successive segments of up to seven bytes. This
+port enables segmented, not block, SDO. For node 10, the default SDO request/reply
+IDs are `0x60A`/`0x58A`; boot-up and heartbeat use `0x70A`. The server and adapter
+handle these exchanges without application calls to SDO-client functions.
+
+The runtime OD is the live storage/metadata. EDS/XDD describes capabilities for
+tools; DCF/XDC describes configured devices. A DBC is not required for raw XNET
+frame I/O. JSON provisioning and EDS conversion do not synthesize application
+behavior or engineering-unit conversions.
+
 ## Files
 
 - [include/xnet_canopen.h](include/xnet_canopen.h): public C ABI.
 - [src/model.cpp](src/model.cpp): version-1 JSON validation and OD construction.
 - [src/driver.cpp](src/driver.cpp): XNET sessions and CANopen driver boundary.
 - [src/device.cpp](src/device.cpp): lifecycle, worker, LSS, channels, diagnostics.
+- [src/internal.hpp](src/internal.hpp): private storage, ownership, bindings and synchronization.
+- [src/CO_driver_target.h](src/CO_driver_target.h): shared stack feature masks, frame layout and lock macros.
 - [src/persistence.cpp](src/persistence.cpp): local JSON storage with atomic replacement.
 - [src/logging.cpp](src/logging.cpp): private spdlog file backend and per-device tags.
 - [src/logging_config.h](src/logging_config.h): compile-time fixed log path.
 - [examples/device.json](examples/device.json): complete working model.
 - [tools/eds_to_json.py](tools/eds_to_json.py): EDS-to-JSON template converter (Python 3.10+, no third-party packages).
-- [Kinco_simulation_assessment.md](Kinco_simulation_assessment.md): scoped device-simulation gaps and external-model data contract.
+- [examples/kinco.template.json](examples/kinco.template.json): generated Kinco provisioning template, not a commissioned model.
+- [examples/kinco.template.inputs.md](examples/kinco.template.inputs.md): generated field-specific inputs and conversion warnings; retained beside the template.
 - [tests/](tests/): fake XNET API, real stack protocol tests, and C header/ABI checks.
 
 The supplied NI header, JSON single header, and vendored spdlog headers are used
@@ -75,11 +180,20 @@ The caller is responsible for correct interface names and paths. Supply an expli
 writable persistence file path per device. Its parent directory must already
 exist before storing LSS configuration. The file itself need not exist.
 
-Successful initialization does not start communication. `start()` and `stop()`
-are idempotent while initialized. `start()` after `stop()` reinitializes protocol
-state, emits boot-up, and waits in NMT Pre-operational for the master. OD values
-and batch IDs survive stop/start. Stop flushes network queues, so stale frames
-do not survive. An NMT Stop command is different: the worker remains running.
+Successful initialization does not start communication. `start()` is a no-op
+when already running; repeated `stop()` calls retain the stopped state but still
+attempt session stop/flush and can report cleanup errors. A FAILED runtime cannot
+be restarted without uninitialization/reinitialization.
+
+`start()` after `stop()` rebuilds protocol state. A configured node emits boot-up
+and waits in NMT Pre-operational for the master; node ID 255 remains
+LSS-unconfigured instead. Application values, communication settings and batch
+IDs survive stop/start, but stack-owned state does not: for example, the error
+register, EMCY history/fault bits and guarding state are reinitialized. Reassert
+still-active model faults after restarting. Stack setup applies the pending LSS
+node ID and rebases relative IDs; it does not activate a pending bitrate.
+Successful stop flushes network queues, so stale frames do not survive.
+An NMT Stop command is different: the worker remains running.
 
 Reset Communication restores communication defaults and retains application
 values and pending LSS settings. Reset Node restores all OD defaults and reloads
@@ -88,7 +202,7 @@ handle or OD structure; batch access resolves current extensions each call.
 Successful protocol resets increment separate counters in `get_status()`, so
 the external model need not infer reset identity from a transient NMT state.
 
-Uninitialize releases sessions, OD, and stack and invalidates
+Successful uninitialize releases sessions, OD, and stack and invalidates
 all batch IDs. IDs are not reused within a handle. Diagnostics survive until
 explicitly cleared or the handle is destroyed.
 
@@ -115,22 +229,32 @@ Required root fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Integer `1` |
+| `schema_version` | Value `1`, using the unsigned-number syntax described below |
 | `node_id` | `1..127`, or `255` for LSS commissioning |
 | `bitrate_kbps` | Whole-number startup bitrate from `1` to `1000` kbit/s; must be supported by the target XNET interface |
 | `identity` | `vendor_id`, `product_code`, `revision_number`, `serial_number`, each uint32 |
 | `objects` | Array of application VAR/ARRAY/RECORD descriptions |
 
-Optional fields: `device_type` (default 0), `heartbeat_ms` (1000),
-`worker_period_us` (1000; range 100..100000), `rpdos`, and `tpdos` (empty),
-plus `node_guarding`, `sync`, and `emcy` objects described below.
+Optional root fields:
+
+| Field | Default | Range / meaning |
+| --- | --- | --- |
+| `device_type` | 0 | uint32, generated `0x1000` |
+| `heartbeat_ms` | 1000 | uint16 milliseconds; 0 disables heartbeat production |
+| `worker_period_us` | 1000 | `100..100000` microseconds of worker wait time after processing; not a fixed cycle deadline |
+| `rpdos`, `tpdos` | Empty arrays | Up to eight configured slots per direction |
+| `node_guarding`, `sync`, `emcy` | Empty configuration objects | Services use the defaults in [service configuration](#node-guarding-sync-and-emcy), rather than being disabled by omission |
+
 Vendor ID and serial number must be nonzero; use an appropriate unique identity
 for each device on the physical network. The example identity is illustrative.
 
 Unknown fields, invalid types, and out-of-range defaults are errors. Input files
 are limited to 4 MiB; custom objects to 4096. Index/subindex and unsigned numeric
-values may use JSON integers or decimal/`0x` strings. Signed values use JSON
-integers. Keep 64-bit integers exact when generating JSON; do not round-trip them
+values, including unsigned configuration fields, may use nonnegative JSON
+integers or decimal/lowercase-prefix `0x` strings. Signed application values use
+JSON integers; BOOLEAN defaults accept JSON booleans or unsigned values 0/1.
+REAL32/64 defaults must be finite JSON numbers and fit the selected type.
+Keep 64-bit integers exact when generating JSON; do not round-trip them
 through a floating-point channel.
 
 ### Objects and values
@@ -144,7 +268,7 @@ generated by the builder, not redefined in `objects`:
 - ARRAY: `index`, `kind: "array"`, common value fields without `value`, and
   `values: [...]`. Up to 254 elements; subindex 0 is generated read-only count.
 - RECORD: `index`, `kind: "record"`, and `members: [...]`. Each member has an
-  explicit `subindex` and value fields. Subindex 0 must be read-only UNSIGNED8
+  explicit `subindex` in `0..254` and value fields. Subindex 0 must be read-only UNSIGNED8
   containing the highest subindex, with no local-write/PDO permission.
 
 Array elements/record fields are addressed separately. Arrays are internally
@@ -197,7 +321,10 @@ python .\tools\eds_to_json.py .\eds\Kinco_FD_20250417_V1.2.eds
 The script uses only the Python standard library. `--encoding cp1252` selects
 an explicit alternative to the default `utf-8-sig`; encoding errors are not
 silently replaced. `--warnings-as-errors` reports warnings but does not write
-output. Conversion errors also leave any existing output unchanged.
+output. EDS parsing/conversion validation errors occur before either output is
+written. Output file writes themselves are sequential, not atomic: an I/O failure
+can leave a truncated/replaced JSON file or a JSON/guide mismatch. Preserve
+commissioned models separately from converter output.
 
 The output is a **template**, not necessarily an initializable model. Unknown
 values are the literal JSON string `"{USER_INPUT}"`, including node ID, selected
@@ -327,7 +454,8 @@ Each entry contains:
   a nonempty mapping without activating the PDO.
 - `transmission_type`: 0..240 or 254/255, default 255.
 - `event_ms`: uint16, default 0; TPDO event time or RPDO timeout.
-- `inhibit_100us`: uint16, default 0, relevant for TPDOs.
+- `inhibit_100us`: uint16, default 0, used by TPDOs only; omit it for RPDOs,
+  where the builder does not use or validate its value.
 - `cob_id`: explicit standard 11-bit CAN identifier, without control bits.
   Optional for PDO1..4: when omitted, the default connection-set ID is resolved
   for the active node on every stack reset. Required for PDO5..8, including
@@ -353,7 +481,9 @@ to PDO5..8: it overlaps SDO/other service IDs and eventually exceeds 11 bits.
 
 Mappings must have the correct `pdo` direction attributes. Local CAN-ID collisions
 and restricted explicit IDs are rejected. Fixed PDO communication/mapping
-records are SDO-read-only; dynamic PDO remapping remains disabled. Writable
+records are SDO-read-only; dynamic PDO remapping remains disabled. Final
+resolved-ID collision checks run for configured nodes; with node ID 255 they
+are deferred until a configured node ID is applied. Writable
 service communication objects are described below. The caller must also avoid
 collisions with other devices on the bus. Eight slots per direction do not imply
 that all sixteen PDOs can be transmitted every worker cycle; size transmission
@@ -481,21 +611,24 @@ reads require SDO-readable metadata. Bindings invoke current OD callbacks, not
 raw memory writes. Worker and channel writes are serialized: the last successful
 write wins. A batch prevents worker interleaving but is not a rollback transaction.
 
-This replaces the first-edition descriptor-array binding signature and removes
-the write-enable argument and `XNET_CO_SKIPPED`. These are source and binary API
-changes: rebuild C callers and update LabVIEW Call Library Function Nodes.
+Callers built against the earlier descriptor-array/write-enable API must be
+rebuilt and their LabVIEW Call Library Function Nodes updated. The current API
+has neither a write-enable argument nor `XNET_CO_SKIPPED`.
 
 ## TPDO, faults, and errors
 
 `request_tpdo(handle, one_based_number)` requires a running, Operational node.
+Requests during LSS bitrate switching are rejected.
 Types 254/255 obey inhibit time; type 0 waits for SYNC. Cyclic synchronous types
 1..240 reject manual requests. Requests may coalesce and transmit current values.
 Acceptance is not a bus-transmission acknowledgment. Channel writes do not
 automatically request a TPDO; write and request are separate operations.
 
 `set_fault()` reports/resets simulated manufacturer faults on bits `0x40..0x4F`.
-Use a nonzero CANopen error code when asserting a fault. The stack generates EMCY
-and updates error state/history; host API failures do not automatically emit EMCY.
+It requires a running, LSS-configured node, but not NMT Operational.
+`active` must be 0 or 1; use a nonzero CANopen error code when asserting a fault.
+The stack generates EMCY and updates error state/history subject to its NMT and
+producer rules; host API failures do not automatically emit EMCY.
 
 Every operation returns a status from the public header. `get_status()` exposes
 runtime/NMT state, active/pending LSS values, separate reset-completion counters, and
@@ -549,7 +682,7 @@ count as a protocol reset. Counters are not persisted across destroyed handles.
 
 At model startup, record a baseline. Each model step compares both counters
 against the previous snapshot: Reset Node normally requires reinitializing the
-external controller consistently with application OD defaults; Reset
+external device/plant model consistently with application OD defaults; Reset
 Communication preserves application state. The library does not reset the
 external model or implement CiA 402 behavior. Each counter wraps modulo 2^32;
 uint32 subtraction gives the number of completions modulo 2^32. Separate counters
@@ -582,10 +715,14 @@ NULL message/capacity 0 to obtain the required size. Messages are capped at 2047
 bytes. Successful operations and diagnostic reads do not clear errors.
 `clear_error()` clears the diagnostic, not a physical bus fault or latched flag.
 
-Worker errors move the runtime to FAILED and quiesce sessions. Uninitialize and
-initialize again to recover; do not assume a successful earlier start means the
-worker is still healthy. Cleanup failures are explicit and retryable.
-XNET nonzero statuses, including warnings, are conservatively surfaced as errors.
+Fatal worker errors move the runtime to FAILED and quiesce sessions. Uninitialize
+and initialize again to recover; do not assume a successful earlier start means
+the worker is still healthy. Cleanup failures are explicit and retryable.
+Nonzero XNET statuses, including warnings, produce diagnostics rather than being
+silently accepted. Not every diagnostic stops communication: output queue
+overflow retains the pending frame for retry, and input queue overflow flushes
+unread input and records the loss. Unsupported incoming frame types/IDs/payloads
+are ignored with a diagnostic. Check runtime state as well as the latest error.
 
 ## File logging
 
@@ -595,7 +732,7 @@ and rebuild. A compiler definition of the same macro overrides the header.
 There is deliberately no runtime path parameter or JSON logging option.
 Default paths are:
 
-- NI Linux RT/Linux: `/var/local/xnet_canopen/xnet_canopen.log`
+- NI Linux RT/Linux: `/var/local/natinst/log/xnet_canopen.log`
 - Windows: `C:\ProgramData\xnet_canopen\xnet_canopen.log`
 
 The deployment account must be able to create/write the parent directory.
@@ -646,8 +783,11 @@ protocol operations. `XNET_CO_IO_ERROR` is recorded if no earlier diagnostic is
 active; otherwise the original code is preserved and logging-failure text is
 appended when space permits. Successful API calls do not clear that diagnostic.
 
-Mock-only CMake builds override the path to the build directory, rather than
-writing deployment logs. Tests cover node-ID changes without losing the trace
+With `XNET_CANOPEN_BUILD_TESTS=ON` and `XNET_CANOPEN_BUILD_LIBRARY=OFF`, CMake
+overrides the integration log path to `xnet_canopen-test.log` in the build
+directory. Enabling tests alongside the shared library does not override its
+deployment log path. The separate logging-test executable always uses its own
+build-directory path. Tests cover node-ID changes without losing the trace
 key, concurrent writes, the rotation threshold, startup open failure/retry, and
 runtime sink failures without recursive logging or loss of the original error.
 
@@ -668,8 +808,11 @@ changes the interface bitrate, waits the delay again, and resumes. Protocol
 processing/transmission is suspended during those intervals. Adapter failure
 marks the worker FAILED; activation has no fabricated success response.
 
-Store writes a version-1 JSON file with identity, pending node ID, and pending
-bitrate. A missing file or any exception while loading it uses both model startup
+Store writes a JSON object with exactly four fields: `schema_version: 1`,
+`identity` as `[vendor_id, product_code, revision_number, serial_number]`,
+`node_id` and `bitrate_kbps`, using the pending LSS settings.
+The identity representation differs from the device model's named object.
+A missing file or any exception while loading it uses both model startup
 settings. Invalid, unreadable, or identity-mismatched files do not fail initialization
 or Reset Node; load exceptions are recorded as `XNET_CO_IO_ERROR` in diagnostics.
 Saved values override only startup LSS
@@ -681,12 +824,357 @@ directory, complete write + fsync, atomic rename, and directory fsync. LSS stora
 success is returned only after completion. A directory-sync failure can occur
 after replacement, so a reported store failure does not prove the old file is
 still present; inspect/retry. No flash writes occur in the normal 1000 Hz path.
+The persistence path must contain a parent-directory component, and that
+directory must already exist; initialization does not preflight writability.
 OD store/restore objects `0x1010/0x1011` are not implemented by this LSS mechanism.
+
+## External device-model integration
+
+The existing batch, status, TPDO-request and fault APIs are the boundary to an
+external CiA 402 or other device model. A dedicated drive-profile API is not
+needed for ordinary command/feedback exchange. Generate only the objects and
+channels required by the agreed modes/tests, not every object found in an EDS.
+For each channel, record index/subindex, type, byte size, signedness, raw
+units/scaling, ownership, default and reset behavior.
+
+### Ownership and permissions
+
+| Owner | Typical data | Recommended policy |
+| --- | --- | --- |
+| Master | Commands and network-configured parameters | Use network permissions required by the device; normally `local_write: false`. Never cyclically echo cached commands back into the OD. |
+| External model | Feedback, statusword and application alarm values | Normally SDO `ro` with `local_write: true`; update through feedback-write batches. |
+| Stack | NMT state, communication timers, error register and protocol state | Use the supported service/status interfaces, not arbitrary model writes to backing memory. |
+
+The EDS converter intentionally emits `local_write: true` for application values
+to simplify preparation. Tighten those generated permissions to the selected
+ownership contract before deployment. Binding validates existence and size;
+read/write permission failures are reported per entry when the batch is used.
+Batch reads currently require SDO-readable metadata: there is no independent
+local-read permission for a genuinely network-write-only object.
+
+Keep command-read and feedback-write batches separate. Preserve signedness and
+exact 64-bit values when converting to VeriStand channels. Physical sensors,
+voltage and plant/load properties can go directly to the external model; route
+them through the OD only if the real device exposes them there.
+
+If modeled I/O can override network controlword/mode, define priority and local
+write permissions explicitly rather than blindly rewriting cached commands.
+
+### Execution and command observability
+
+An ordinary functional loop is:
+
+```text
+Initialize from provisioned JSON and bind command/feedback batches
+Record reset-counter baselines
+At each agreed VeriStand step:
+    Read status, command/parameter batch, then status again
+    Check operation and per-entry results; handle reset-counter changes
+    Execute the external device/plant model using the host elapsed time
+    Write feedback and check all per-entry results
+    Request affected event-driven TPDOs after successful required writes
+    Report fault assertion/clear transitions through set_fault()
+```
+
+Follow the [reset sampling rules](#status-snapshot-and-reset-notification);
+separate API calls are not a transaction around model execution. The worker does
+not run the external model between RPDO application and TPDO packing, so this
+loop does not guarantee same-SYNC-cycle feedback.
+
+Latest-value polling is the current scope, with command pacing/handshakes agreed
+with the master. Multiple RPDOs may overwrite pending data before application,
+and several SDO writes may occur between model reads. A successful read proves
+OD access, not freshness or observation of every controlword edge/repeated write.
+NMT/guarding status and log records are snapshots/observations, not lossless
+transition histories. A sequence counter alone could detect missing writes but
+would not preserve overwritten values. If a future feature requires every
+command, capture it before coalescing or define a suitable acknowledged protocol.
+
+Writing alarm/statusword objects does not emit EMCY. `set_fault()` does not write
+those model-owned objects. Keep internal alarm words, drive error codes, status
+bits and CANopen EMCY representations consistent explicitly. Report fault
+transitions, not unconditional repeated assertions. If TPDO/fault requests cross
+VeriStand channels, use an explicit acknowledgment/sequence scheme to avoid
+accidentally repeating actions.
+
+### Extension boundaries, not current requirements
+
+The following are conditional capability limits, not a mandatory implementation
+backlog. Add a generic mechanism only when a selected device/test requires it.
+
+| Required behavior, if selected | Why latest-value batches alone are insufficient | Extension direction |
+| --- | --- | --- |
+| Every command edge or repeated command write | Values can coalesce in RPDO buffers or between host reads. | Capture ordered events before loss, or agree command pacing/acknowledgments. |
+| Application-specific SDO validation/abort | By model polling time, an SDO success response may already have been sent. | Validate synchronously through an in-library OD extension; a later model decision cannot retroactively reject an acknowledged write. |
+| Device save/default commands | LSS storage covers node ID/bitrate only; a stored command byte has no persistence/reset side effect. | Device adapter defines parameter groups and algorithms; supply reusable command/persistence hooks if required. |
+| Vendor-object-triggered bitrate change | Current physical activation is through LSS, not an arbitrary application OD value. | Device adapter interprets vendor encoding; use a controlled generic reconfiguration path if added. |
+| Configurable communication-error reaction | Model alarms cannot undo the stack's NMT/PDO/EMCY effects. | Define generic policy and recovery semantics; keep vendor-object interpretation outside the core. |
+| Truly network-write-only model input | Batch reads require SDO-readable metadata. | Add independent local-read semantics only for a confirmed need; do not broaden network permissions as a workaround. |
+| Model coordination with individual SYNCs | No model-facing SYNC sequence/event/timestamp is exported. | Define observation/latching semantics if interpolation needs them; motion interpolation stays in the model. |
+
+## Kinco configuration and compatibility notes
+
+These notes preserve device-specific findings useful when provisioning or
+extending the simulator. They are not a claim that the wrapper reproduces a
+complete physical Kinco drive or that all listed options are required.
+
+### Sources and interpretation
+
+- Primary behavior reference: the supplied
+  [Kinco drive manual](customer_input/Kinco%20低压伺服驱动器使用手册20260909.pdf),
+  particularly chapters 4, 5, 8 and 11 and the conversion appendix.
+- Supplied configuration reference:
+  [Kinco EDS](eds/Kinco_FD_20250417_V1.2.eds).
+- Provisioning artifacts: [template JSON](examples/kinco.template.json) and its
+  [generated input guide](examples/kinco.template.inputs.md).
+
+Manual page numbers below mean physical PDF pages (1-based viewer pages), not
+printed footers; in the main body the printed page is one less. Converted text,
+GUI labels, shorthand overview tables and isolated examples are not substitutes
+for detailed object definitions and actual wire behavior. The manual itself
+contains conflicting/editorial material. Use the CANopen chapter's FD1x3 slave
+baseline; other product-family and EtherCAT/CoE tables do not automatically
+establish CANopen requirements. Resolve device behavior against the manual and
+selected firmware; use the supplied EDS for provisioning, checking genuine
+conflicts against the CANopen specification and agreed device contract.
+
+The current scope uses fixed PDOs and latest-value command polling with agreed
+pacing. Vendor parameter save/default behavior, vendor-object bitrate activation,
+configurable interruption policy, custom SDO validation and lossless command
+queues are deferred, not implied by storing their OD objects.
+
+### Provisioning and fixed PDO layout
+
+The checked-in Kinco template currently needs four commissioning inputs:
+`node_id`, `bitrate_kbps`, `worker_period_us` and `identity.serial_number`.
+The generated guide gives ranges and EDS-supported bitrates
+`50, 125, 250, 500, 1000` kbit/s. These are configuration-reference rates, not a
+restriction of the library's startup range or the standard LSS table. Choose
+unique identity/node settings, replace every placeholder, and review automatic
+defaults and permissions. Regeneration can change the required input list.
+
+The EDS declares eight RPDOs and eight TPDOs. Its nonempty default mappings are:
+
+| PDO / mapping record | Fields in EDS order | Bytes |
+| --- | --- | --- |
+| RPDO1 / `0x1600` | `0x607A:00` I32 target position; `0x6060:00` I8 mode; `0x6040:00` U16 controlword | 7 |
+| RPDO2 / `0x1601` | `0x6081:00` U32 profile velocity; `0x60FF:00` I32 target velocity | 8 |
+| TPDO1 / `0x1A00` | `0x6041:00` U16 statusword; `0x6063:00` I32 actual position; `0x6061:00` I8 active mode | 7 |
+
+Other EDS slots have zero default mapped entries and become inactive. Preserve
+slot numbering and the agreed payload order. Some manual examples use a
+different order or different TPDO fields; they are configuration examples, not
+one universal layout. Configure the master and JSON to match exactly. PDO5..8
+need explicit IDs even when inactive; the manual's extra-PDO example `0x43F`
+is an ordinary 11-bit ID, not evidence that extended frames are necessary.
+
+### Application channel selection
+
+Directions here are relative to the external model. This is a selection guide,
+not a mandatory complete OD. Read commands through batch reads and write
+feedback through batches with appropriate `local_write` permissions.
+
+| Model inputs | OD addresses / representation | Maintenance considerations |
+| --- | --- | --- |
+| Controlword / requested mode | `0x6040:00` U16 / `0x6060:00` I8 | Drive-state commands, fault-reset edges and mode selection belong in the model. |
+| Position / velocity targets | `0x607A:00` I32 / `0x60FF:00` I32 | Detailed manual table marks these read/write/mappable; overview `W` shorthand is not a confirmed local-read blocker. |
+| Profile speed and ramps | `0x6081:00`, `0x6083:00`, `0x6084:00` U32 | Profile velocity is also read/write/mappable in the detailed table; use raw scaled values. |
+| Torque/current command and limit | `0x6071:00` I16, `0x60F6:08` I16, `0x6073:00` U16 | Select the actual command path/scaling for the mode; do not reinterpret in transport code. |
+| Homing | `0x6098:00`, `0x6099:01/02`, `0x609A:00` U32, `0x607C:00` I32, `0x6099:05` U8 | Select homing method, speeds, acceleration, offset and offset mode as required (manual page 103). |
+| Stop behavior | `0x605A..0x605E:00` I16, `0x6085:00` U32 | Model stop-option codes and quick-stop deceleration (pages 107/108). |
+| Interpolation | `0x3011:01/02` plus confirmed target object(s) | For CANopen mode 7, period encodings 0/1/2/3 mean 1/2/4/8 ms; clock enable is 0/1. This does not specify the target-buffer/latch contract. |
+| Timeout response, limits and I/O configuration | `0x6007:00` and selected manufacturer objects | Define model reactions and I/O priority; `0x6007` does not control library communication policy. |
+
+| Model outputs | OD addresses / representation | Maintenance considerations |
+| --- | --- | --- |
+| Statusword / active mode | `0x6041:00` U16 / `0x6061:00` I8 | Model generates state/mode bits and accepted mode, not the library. |
+| Actual position | `0x6063:00` I32 | Used by the CANopen examples; do not substitute EtherCAT `0x6064` without confirming semantics. |
+| Actual velocity / current / digital inputs | `0x606C:00` I32 / `0x6078:00` I16 / `0x60FD:00` U32 | Manual page 100 confirms these. Input bits 0/1/2/3 indicate negative limit, positive limit, home and hardware lock. |
+| Alarm words | `0x2601:00`, `0x2602:00` | Select firmware-appropriate bits; conflicting manual tables must not leak into generic transport logic. |
+| Optional additional diagnostics | `0x2605:07`, `0x603F:00`, `0x2680:00`, `0x6077:00`, `0x6064:00` | Confirm representation and selected-device meaning before adding them; position entries/error representations are not interchangeable. |
+
+Known manual conversions include
+`DEC = rpm * 512 * encoder_resolution / 1875` for velocity and
+`DEC = (rps/s) * 65536 * encoder_resolution / 4000000` for acceleration.
+Confirm encoder resolution, peak current, position units and command-specific
+torque/current conventions in the model/manifest. Do not send unscaled
+engineering values merely because a GUI displays rpm or Arms.
+
+### Compatibility hazards and conditional behavior
+
+| Topic | Retained finding / required care | Owning layer |
+| --- | --- | --- |
+| Operating modes | Page 100 lists `1, 3, 4, -3, -4, 6, 7`; pages 131/132 describe CANopen interpolation mode 7. Select only required modes for the actual variant; EtherCAT CSP/CSV/CST `8/9/10` are not substitutes. | External model / test contract |
+| Communication-range application settings | The manual mentions `0x103F` immediate target updating and `0x100B` node settings. Custom JSON objects are restricted to `0x2000..0xBFFF`, so these cannot simply be added as application objects. Confirm CAN-facing requirements and add supported integration/schema handling if selected. Serial save/restart instructions and CAN DIP switches do not establish an LSS-equivalent setting path. | Integration / provisioning |
+| PDO inhibit units | Manual pages 123/129 say ms; standard `0x1800:03` and JSON `inhibit_100us` use 100 us. Verify raw values or traces/GUI conversion; do not change stack units based on wording alone. | Provisioning / on-wire contract |
+| Transmission/frame variants | Broad manual claims of 29-bit IDs or all transmission types do not change current 11-bit/type 0..240/254/255 support. RTR-triggered TPDO types 252/253 are unsupported; guarding RTR is a different service. | Integration, only if actually required |
+| Vendor baud object `0x2F81:00` | Page 127 encoding is `100=1000`, `50=500`, `25=250`, `12=125`, `5=50`, `1=10` kbit/s; default encoding 50 means 500 kbit/s. RS232's 38,400 bit/s setting is unrelated. Current writes only change OD storage, not adapter bitrate. Activation/save timing requires confirmation if implemented. | Optional vendor adapter + generic reconfiguration |
+| Save/default `0x2FF0` | Page 106: U8 `:01=1` stores configuration/control parameters, `:01=10` initializes configuration, `:03=1` stores motor parameters. Defaults must subsequently be saved (page 59). A stored byte does none of this; partitions, completion and readback semantics need definition if selected. This is not LSS persistence or generic CiA 402 behavior. | External device adapter/model, with generic hooks if needed |
+| Interruption `0x6007` | Pages 128/132 describe 0=no action and 1=error; the current stack still reports life-guard failure and leaves NMT Operational regardless. Ignoring the model alarm cannot restore PDO exchange or undo EMCY. See [policy limitation](#deferred-communication-interruption-policy). | Generic integration policy + vendor interpretation |
+| Torque/current scaling | Page 101 mixes percentage-of-rated-torque and current/DEC descriptions for `0x6071`; `0x60F6:08` is a separate current command. Confirm the selected raw convention. | Model / manifest |
+| Alarm/status bits | Pages 67/107 disagree on `0x2601` encoder-error bits and bit 14; page 99's statusword bit-4 wording/polarity also needs care. Confirm the actual firmware map and mode-specific high bits. | External model |
+| Error representations | `0x2602` bit 12 / internal error `0x8100` is associated with interruption in the manual; it does not establish an EMCY wire code or exact manufacturer-byte layout. Current fault API uses CANopenNode conventions. | Model / device adapter |
+| Interpolation observation | Relaxed timing does not define mode-7 buffering, latching or which commands must be observed. Confirm those semantics before adding a SYNC event API. | Model contract / generic event boundary |
+| Editorial examples | Page 118's introductory mode-address wording conflicts with the object table; page 134 labels `0x03EB` as 1000 ms, but 1000 is `0x03E8`. Prefer consistent object definitions and standard SDO framing over isolated byte examples. | Provisioning / test expectations |
+
+## Maintaining and extending the integration
+
+### Worker and driver flow
+
+The worker in [src/device.cpp](src/device.cpp) is the sole running owner of frame
+dispatch and protocol time advancement. It uses actual monotonic elapsed
+microseconds, not an assumed nominal period:
+
+```text
+Receive one bounded nonblocking XNET read
+    -> validate each frame and match ID/mask/RTR subscriptions
+    -> dispatch registered stack callback
+    -> service CO_process(..., dt=0) between frames for general protocols
+    -> handle reset/bitrate-switch requests before continuing
+CO_process(..., elapsed_us)
+    -> handle reset, otherwise:
+       CO_process_SYNC() -> CO_process_RPDO() -> CO_process_TPDO()
+Drain pending adapter output
+Wait worker_period_us, releasing the shared OD mutex
+```
+
+LSS activation suspends receive/protocol/transmit processing during its required
+silence intervals. General-protocol draining between frames does not make RPDO
+delivery lossless. The host model executes independently, not inside this flow.
+Do not introduce a second unsynchronized stack-processing path from LabVIEW.
+Frame reads/writes use zero-timeout XNET calls; persistence is a separate slow
+path that releases the OD mutex while retaining lifecycle/worker ownership.
+Synchronous logging can still perform disk I/O while the OD mutex is held.
+
+[src/driver.cpp](src/driver.cpp) implements the
+[CANopenNode driver interface](../301/CO_driver.h), not SDO/PDO decoding itself:
+
+- `CO_CANrxBufferInit()` records ID/mask/RTR subscriptions; receive dispatch calls
+  the matching protocol callback. Internal frame bit `0x800` represents RTR, not
+  a twelfth CAN-ID bit. Translate it to/from XNET's separate frame type.
+- Validate stream record lengths and types before payload access. Keep eight
+  stable, zero-initialized data bytes even for short frames because some stack
+  callbacks copy all eight bytes. Ignore transmit echoes.
+- `CO_CANsend()` queues a copy, bounded by the stack transmit buffers.
+  `transmit()` submits one frame per zero-timeout write; queue-full retains it
+  for retry and records overflow. Queue acceptance is not bus delivery.
+- `CO_CANmodule_process()` translates hardware CAN state/errors.
+  `CO_CANclearPendingSyncPDOs()` can remove pending adapter copies, not frames
+  already accepted by XNET. Do not flush unrelated traffic to cancel one PDO.
+
+### Stack allocation and OD lifetimes
+
+[src/model.cpp](src/model.cpp) owns aligned values, VAR/RECORD descriptors, a
+sorted `OD_entry_t` list and `CO_config_t`. ARRAY values use independent record
+subentries. Finalize storage before publishing pointers to the stack; never
+resize backing vectors after initialization. The model must outlive the stack.
+See [OD documentation](../doc/objectDictionary.md) and
+[generated example OD](../example/OD.c) for stack layout references, not runtime
+configuration inputs. The upstream [blank driver](../example/CO_driver_blank.c)
+and [main template](../example/main_blank.c) are not working XNET/scheduler code.
+
+Stack setup uses `CO_new()` -> `CO_CANinit()` -> `CO_LSSinit()` and callbacks ->
+`CO_CANopenInit()` -> `CO_CANopenInitPDO()`. Normal mode/session startup and
+cleanup are coordinated by the wrapper. Check every return and initialization
+`errInfo`. `CANptr` consistently points to the device context, never a CAN frame.
+`CO_delete()` invalidates stack-owned extensions; reset code detaches/rebuilds
+them while retaining model storage. Preserve wrapper-decorated communication
+callbacks and resolve fresh OD streams on batch calls, rather than caching stale
+extension pointers or bypassing them with direct memory writes.
+
+### PDO mapping internals
+
+Mapping records contain descriptors
+`[index:16][subindex:8][bit-length:8]`; descriptors are configuration, not payload.
+For example, mapping `0x2000:00` U32 then `0x2001:00` U16 gives descriptor words
+`0x20000020`, `0x20010010`. Values `0x12345678` and `0xABCD` produce six bytes:
+`78 56 34 12 CD AB`. Mapping order, not numeric OD order, determines offsets.
+This port requires whole-value byte widths and does not enable bitwise mapping.
+
+In [CO_PDO.c](../301/CO_PDO.c):
+
+- `CO_TPDO_init()`/`CO_RPDO_init()` use `PDO_initMapping()` and `PDOconfigMap()`
+  to find OD entries, validate permissions/lengths and prepare OD I/O.
+- `CO_TPDO_process()` decides when to send; internal `CO_TPDOsend()` reads
+  mapped values through OD callbacks and submits a packed frame.
+- `CO_PDO_receive()` buffers input; `CO_RPDO_process()` later applies it through
+  OD writes. That buffer is not an event queue.
+
+The stack's `OD_write_PDO_mapping()`, `OD_write_18xx()` and `OD_write_14xx()`
+support dynamic configuration in other ports. This integration deliberately
+keeps those records read-only. Adding live PDO configuration is a new behavioral
+contract, not just changing backing bytes or enabling a flag; validation,
+extension updates, reset defaults, master expectations and tests must agree.
+
+### Compile-time configuration
+
+All C stack sources and C++ wrapper sources must use identical feature settings:
+macros change structure layouts and API availability. The integration CMake
+object target supplies the shared include paths. Put port configuration in
+[src/CO_driver_target.h](src/CO_driver_target.h), not scattered per-source defines.
+
+| Layer | Current choice / rule |
+| --- | --- |
+| Allocation | `CO_MULTIPLE_OD` supplies per-handle `CO_config_t`/OD. Leave `CO_USE_GLOBALS` undefined; defining it as zero still selects `#ifdef` branches. |
+| Capability masks | Combine feature bits with `\|`; compiled features do not by themselves create service instances or OD entries. |
+| Counts and OD pointers | `Model::configure()` connects service counts/OD entries to allocation. Keep counts, compiled sources and descriptors consistent; do not edit internal `CO_RX_CNT_*`/`CO_TX_CNT_*` index calculations. |
+| Runtime values | JSON/SDO communication values configure enabled services; they do not enable a compiled-out service. |
+| Supported byte order | Little-endian storage and targets only; do not remove the target check without implementing scalar/wire conversion. |
+
+Current masks enable the NMT/heartbeat base, node-guarding slave, segmented SDO
+server, EMCY producer/history/inhibit/configuration, SYNC consumer with live OD
+handling, both PDO directions with timers/SYNC/OD I/O, and LSS slave.
+SDO client, heartbeat consumer, guarding master, SYNC producer, TIME, LEDs,
+gateway, GFC, SRDO, trace and general OD storage are disabled.
+
+Important macro traps:
+
+- `CO_CONFIG_NMT = 0` retains base NMT/heartbeat; `CO_CONFIG_SDO_SRV = 0`
+  would retain expedited SDO, not remove the server.
+- `CO_CONFIG_FLAG_OD_DYNAMIC` enables service-specific live OD handling. Global
+  dynamic handling is off here; SYNC explicitly opts in while PDO does not.
+  Do not enable it globally to add a single service callback.
+- Callback-pre flags enable wake-up callbacks, not a worker by themselves.
+  Timer-next flags calculate deadlines, not whether protocol timers exist.
+- [CO_config.h](../301/CO_config.h) documents flags, but many illustrated masks
+  are under `CO_DOXYGEN`; actual fallback masks live in protocol headers.
+  Do not define `CO_DOXYGEN` in an application build.
+- LSS persistence uses its store callback and does not require
+  `CO_CONFIG_STORAGE` or implement general OD store/restore.
+
+The numbered upstream folders identify CiA specification areas, not OD address
+ranges: `301` is core communication, `303` includes LED recommendations, `304`
+is CANopen Safety, `305` is LSS, and `309` includes the ASCII gateway. Adding an
+upstream module still requires integration configuration, OD entries and processing.
+
+### Change checklist
+
+1. Decide whether the feature belongs in provisioning, the external device
+   model, a generic model-facing hook, or the communication/driver layer.
+   Reuse CANopenNode services and OD extensions rather than reimplementing protocols.
+2. For a schema/type/service change, update validation, aligned storage/defaults,
+   descriptors, service counts, feature masks and CMake sources as applicable.
+   Wire EDS conversion and generated input guidance when the field is importable.
+3. Define behavior for startup, host stop/start, both protocol reset types, LSS
+   node changes, uninitialize/reinitialize and failed cleanup. Rebase relative
+   COB-IDs from model defaults; do not preserve IDs for an old node by accident.
+4. Preserve shared locking, extension callbacks and worker ownership. Never free
+   state while a worker/store operation can still use it. Expose errors through
+   operation/per-entry results and diagnostics rather than success-shaped defaults.
+5. For ABI changes, update the public header, C ABI assertions and LabVIEW
+   descriptors/call nodes together. Schema-version-1 optional fields can still
+   require a newer runtime; older binaries reject unknown keys.
+6. Add focused fake-XNET tests using the real stack, plus converter tests for
+   provisioning changes. Exercise bounds, permissions, callback failures, reset
+   retention, relative IDs/collisions and failure/retry paths relevant to the change.
+7. Update this guide and perform target acceptance for hardware-dependent
+   behavior. Mock success cannot establish bus timing, physical bitrate changes,
+   installed XNET compatibility or filesystem durability.
 
 ## Validation and limits
 
 Automated groups exercise model validation and numeric limits, batch
-Enable/partial errors/string buffers, concurrent callers, caller-managed resources and cleanup,
+permissions/partial errors/string buffers, concurrent callers, caller-managed resources and cleanup,
 real SDO/PDO/NMT/EMCY traffic through the stack, LSS selection/inquiry/node-ID
 changes, bitrate silence sequencing, persistence/reload/failure paths, and
 synchronous manual requests. Additional groups cover guarding RTR filtering and
@@ -702,12 +1190,14 @@ Eight-PDO groups cover all eight transmit/receive paths, ninth-slot rejection,
 explicit-ID requirements, higher-slot collisions (including live SYNC/EMCY writes),
 empty/disabled slots, synchronous PDO8, stop/start, NMT resets and LSS node changes.
 
-Development validation: Windows/MSVC and Linux x86-64/GCC mock builds/tests;
-Linux ASan/UBSan. These are not NI Linux RT ARM64 hardware acceptance.
+Use Windows/MSVC or Linux x86-64/GCC mock builds/tests for development, with
+ASan/UBSan available on Linux. These do not establish NI Linux RT ARM64
+hardware acceptance.
 
 Important limits:
 
-- No CiA 402 state machine, motion model, EDS converter, or VeriStand UI is supplied.
+- No CiA 402 state machine, motion model, in-library EDS loader, or VeriStand UI is supplied.
+  The standalone EDS-to-JSON template converter is supplied.
 - Workers use normal inherited OS scheduling; no hard real-time guarantee.
 - Receive work is bounded to one 8 KiB read per iteration. Output writes one frame
   at a time with timeout zero, avoiding ambiguous multi-frame partial writes.
@@ -717,7 +1207,10 @@ Important limits:
   already handed to XNET cannot be selectively cancelled through `nxFlush`.
   No strict SYNC-window guarantee is made; session-wide flushing is reserved
   for stop/reset/bitrate switching, not cancelling one PDO.
-- No automatic recovery policy is implemented for bus-off or XNET failures.
+- No wrapper-controlled bus-off restart/recovery or FAILED-runtime recovery is
+  implemented. Physical warning/passive/bus-off flags are recomputed from XNET
+  state and can clear when hardware recovers, but this does not automatically
+  return NMT to Operational or restart a FAILED runtime.
 
 Manual acceptance on the target should cover same-port stream input/output,
 boot-up and heartbeat, expedited/segmented SDO, fixed RPDO/TPDO in appropriate
@@ -726,3 +1219,11 @@ switching, guarding RTR/toggle/timeout behavior when selected, writable SYNC/EMC
 configuration, and file reload after restarting the process. Verify queue behavior,
 physical timing, installed XNET ABI compatibility, and your filesystem's
 durability semantics.
+
+For a minimal first hardware check, use correct termination/wiring, matching
+bitrate and distinct node IDs. With simulator node 10, start the worker, verify
+boot-up/heartbeat on `0x70A`, then read vendor ID `0x1018:01` through
+`0x60A`/`0x58A`. Put the node Operational before checking a known fixed PDO
+payload. Expand to RPDO commands and external-model feedback, command pacing,
+fault/clear behavior and both reset paths. Do not treat successful SDO or NMT
+Operational as proof of implemented CiA 402 behavior.

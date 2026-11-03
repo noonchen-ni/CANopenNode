@@ -18,6 +18,7 @@ The library owns all frame I/O. A CAN database is not needed by XNET.
 - [src/logging.cpp](src/logging.cpp): private spdlog file backend and per-device tags.
 - [src/logging_config.h](src/logging_config.h): compile-time fixed log path.
 - [examples/device.json](examples/device.json): complete working model.
+- [tools/eds_to_json.py](tools/eds_to_json.py): EDS-to-JSON template converter (Python 3.10+, no third-party packages).
 - [Kinco_simulation_assessment.md](Kinco_simulation_assessment.md): scoped device-simulation gaps and external-model data contract.
 - [tests/](tests/): fake XNET API, real stack protocol tests, and C header/ABI checks.
 
@@ -157,6 +158,7 @@ Value fields:
 | --- | --- |
 | `type` | `BOOLEAN`, `UNSIGNED8/16/32/64`, `INTEGER8/16/32/64`, `REAL32/64`, `VISIBLE_STRING`, `OCTET_STRING` |
 | `value` | Required initial scalar/string value; octet strings use an array of bytes |
+| `value_offset` | Optional `"NODE_ID"` for integer defaults: add the active node ID to `value` when restoring the default |
 | `size` | Required only for strings: fixed capacity `1..4096` bytes |
 | `access` | SDO `ro`, `wo`, or `rw` (default `rw`) |
 | `pdo` | `none`, `tx`, `rx`, or `both` (default `none`) |
@@ -167,7 +169,149 @@ room for NUL in the fixed slot. OCTET_STRING defaults may be shorter than capaci
 the remainder is zero-filled. Strings are not PDO-mappable in this edition.
 Unicode strings, DOMAIN, nonstandard integer widths, variable-size channel slots,
 and arbitrary vendor-specific communication objects are explicitly unsupported.
-An EDS-to-model converter is not included.
+
+`value_offset: "NODE_ID"` supports signed/unsigned integer VARs, record members
+other than subindex 0, and a common offset on every ARRAY element. The stored
+`value` is the base, not an already-resolved number. Initialization and Reset
+Node evaluate the default against the active node, including persisted startup
+settings. Reset Communication, stop/start and LSS node-ID changes do not overwrite
+live application values. Node ID 255 (unconfigured) contributes zero. Addition
+must fit the declared type; overflow is an error, not wrapping arithmetic.
+
+### EDS conversion
+
+From this directory, generate a template and capture its warnings:
+
+```powershell
+python .\tools\eds_to_json.py .\eds\Kinco_FD_20250417_V1.2.eds .\examples\kinco.template.json 2> conversion-warnings.txt
+```
+
+The output argument is optional. With only an EDS path, the converter replaces
+its extension with `.json` and writes beside the source EDS; the `.inputs.md`
+guide is placed in the same folder. An explicit output path still takes precedence:
+
+```powershell
+python .\tools\eds_to_json.py .\eds\Kinco_FD_20250417_V1.2.eds
+```
+
+The script uses only the Python standard library. `--encoding cp1252` selects
+an explicit alternative to the default `utf-8-sig`; encoding errors are not
+silently replaced. `--warnings-as-errors` reports warnings but does not write
+output. Conversion errors also leave any existing output unchanged.
+
+The output is a **template**, not necessarily an initializable model. Unknown
+values are the literal JSON string `"{USER_INPUT}"`, including node ID, selected
+bitrate, worker period, missing required nonzero identity fields, string
+capacities, unknown types, and unresolved expressions or mappings. Replace each
+placeholder with a correctly typed JSON value before initialization: for
+example, `10`, `125`, or `true`, not
+quoted numeric/boolean text. The runtime rejects unresolved placeholders and
+reports their JSON path. String capacity must include space for a visible
+string's terminating NUL. For `ro`/`const` strings with known initial values,
+capacity is inferred automatically: ASCII byte length plus one for
+VISIBLE_STRING, or at least one byte for OCTET_STRING. Writable strings and
+strings with unresolved defaults still need an explicit capacity.
+
+Read-only SDO access does not remove the runtime's storage requirement, nor does
+it disable host writes when `local_write: true`. Inferred capacity is fixed:
+longer host strings require manually increasing `size`. For Kinco `0x6504`, the
+known manufacturer string produces `size: 31` without a placeholder.
+
+To reduce manual editing, generated application values have `local_write: true`,
+independently of their network SDO permissions. Structural subindex 0 stays
+read-only and is not locally writable. Missing numeric OD defaults become `0`;
+missing VISIBLE_STRING/OCTET_STRING defaults become `""`/`[]`. Existing EDS
+defaults are preserved. Missing supported numeric communication values also
+become zero, but required nonzero identity values, COB-IDs and mapping structure
+are not guessed. In particular, a missing PDO transmission type becomes `0`
+(synchronous acyclic, waiting for SYNC), **not** asynchronous type 254/255.
+Automatic defaults are reported as warnings: they are simulator starting values,
+not evidence of the real device's factory settings, and may differ from EDS
+limits. Unsupported expressions still require manual resolution, not zeroing.
+
+JSON comments are not needed: the converter also writes
+`kinco.template.inputs.md` next to `kinco.template.json`. This Markdown companion guide
+is **not** loaded by the simulator. It identifies application fields by searchable
+OD index/subindex and field name, rather than by position in the JSON array.
+JSON Pointer paths are retained only as a secondary reference for tools.
+Expected types/ranges, descriptions and illustrative examples are included.
+Supported bitrates from the EDS and object names/addresses/default expressions
+are included where applicable. It also retains all conversion warnings and
+explains the automatic-default policies.
+Open it in VS Code's Markdown preview for a readable input table and detailed
+field explanations; only the model file remains JSON.
+
+For example, `/node_id` is described as an integer `1..127`, or `255` for LSS
+commissioning, with example `10`. A string `size` field explains its byte
+capacity and NUL requirement and gives the minimum needed by its initial value.
+An application field is labeled, for example,
+`index=0x2001, subindex=0x00, size`: search for `0x2001` in the editor, then edit
+that object's `size` (or the indicated record member's field).
+Examples are guidance, not confirmed commissioning settings; edit the model
+file, not the guide. `--warnings-as-errors` leaves both files unchanged.
+
+The converter:
+
+- Imports application VARs and explicit ARRAY/RECORD subentries in
+  `0x2000..0xBFFF`. Arrays are emitted as records to preserve per-subentry types,
+  permissions and sparse indices. Subindex 0 is normalized, with a warning, to
+  the runtime's read-only UNSIGNED8 highest-subindex convention.
+- Uses `0x1018` defaults for identity, with DeviceInfo fallback for vendor,
+  product and revision. A missing or zero serial number needs user input.
+  Translates device type, heartbeat, guarding, SYNC and EMCY settings into their
+  dedicated JSON fields, rather than redefining communication objects.
+- Reads actual PDO mappings from `0x1600..0x1607` / `0x1A00..0x1A07`, respecting
+  the active subindex-0 count, and communication settings from
+  `0x1400..0x1407` / `0x1800..0x1807`. Preserves slot numbers, disable bits and
+  timing units. Validates references, directions, full target widths and the
+  64-bit payload limit. Missing active mapping words produce a placeholder for
+  the complete mapping list; known invalid mappings are errors.
+- Preserves PDO eligibility independently of actual mappings. `ro`/`const`
+  permit TX, `wo` permits RX, `rw` permits both, and `rwr`/`rww` select TX/RX.
+  BOOLEAN occupies one byte in this runtime; bit-level/partial-field mapping
+  is not supported.
+- Recognizes integer constants, `$NODEID`, `$NODEID + constant`, and
+  `constant + $NODEID`, without evaluating arbitrary Python or EDS expressions.
+  Integer application defaults use `value_offset`; PDO/SYNC/EMCY IDs use
+  `cob_id_offset`. Other expressions, or expressions in fields without offset
+  support, produce explicit placeholders and warnings with the source text.
+
+For example, `DefaultValue=$NODEID+0x240` in a PDO communication COB-ID becomes:
+
+```json
+{
+  "cob_id": 576,
+  "cob_id_offset": "NODE_ID"
+}
+```
+
+The runtime resolves this to `0x24A` at node 10 and `0x26A` at node 42. A scalar
+default of `$NODEID+0x80` becomes `"value": 128, "value_offset": "NODE_ID"`;
+application defaults follow the reset rules above, not live COB-ID rebasing.
+These optional schema-version-1 extensions require the updated runtime; older
+runtime binaries reject the new keys.
+
+Every warning is printed to stderr and saved in the companion guide. Warnings
+cover missing inputs, automatic defaults, normalized
+counts, unsupported/unrepresented fields, unused metadata and definitions,
+omitted communication objects, fixed/read-only PDO records, RTR limitations,
+and absent optional services that will use runtime defaults. Names, limits,
+flags and supported-feature lists are not imported as runtime validation rules.
+Unsupported data types remain explicit type/value placeholders; compact
+subobject layouts and unsupported object kinds require manual expansion or
+conversion and are errors. No device behavior is synthesized.
+
+Standalone converter tests:
+
+```powershell
+python -m unittest discover -s .\tests -p test_eds_to_json.py
+```
+
+When Python 3.10+ is found, the CMake test build also registers converter tests
+and validates filled test templates through the real C++ loader. Customer EDS
+checks run only when the corresponding supplied file is present. End-to-end
+tests supply test settings for remaining placeholders; production commissioning
+settings are left for the user.
 
 ### PDOs
 
@@ -187,7 +331,13 @@ Each entry contains:
 - `cob_id`: explicit standard 11-bit CAN identifier, without control bits.
   Optional for PDO1..4: when omitted, the default connection-set ID is resolved
   for the active node on every stack reset. Required for PDO5..8, including
-  inactive slots. PDO5..8 IDs are absolute and are not incremented by the node ID.
+  inactive slots. Unless `cob_id_offset` is specified, PDO5..8 IDs are absolute
+  and are not incremented by the node ID.
+- `cob_id_offset`: optional `"NODE_ID"` with an explicit `cob_id`. Treats that
+  ID as a base and adds the active node ID on initialization and communication
+  resets, including PDO5..8. Node 255 contributes zero. Omission retains the
+  existing absolute-ID behavior for explicit IDs. Resolved IDs must be valid,
+  nonrestricted 11-bit IDs and must not collide with other local services.
 
 Disabled PDOs have bit 31 set in their generated communication COB-ID and neither
 transmit nor apply received data. Empty mappings are valid inactive slots, not
@@ -232,6 +382,23 @@ Pre-operational on a life-guard timeout. Clearing the timeout does not
 automatically return it to Operational; the master controls that transition.
 Heartbeat consumer and node-guarding master remain disabled.
 
+#### Deferred communication-interruption policy
+
+The current scope does not require configurable interruption reactions.
+`get_status().node_guarding_timeout` reports the current condition to the
+external model, which owns drive alarms and motion reactions. However, the
+communication stack independently reports the guarding error through its EMCY
+rules and moves an Operational node to Pre-operational, preventing Operational
+PDO exchange. The model cannot undo these effects merely by ignoring the flag.
+
+A configured application object such as Kinco `0x6007:00` is currently ordinary
+OD storage; its value does not alter this library policy. If tests later require
+an "ignore interruption" setting, first confirm the expected NMT, PDO, EMCY and
+recovery behavior. Then provide a generic communication-error policy mechanism,
+with vendor-object interpretation in the device adapter/model. This is an
+important deferred compatibility item, not an implemented option or a current
+requirement. Existing timeout detection and reporting remain unchanged.
+
 Example optional fields for a guarding-based simulation (merge into a complete
 version-1 model):
 
@@ -256,6 +423,12 @@ Node restore the JSON communication defaults; ordinary channel/SDO changes are
 not persisted. Existing heartbeat/PDO defaults are unchanged when these optional
 objects are omitted. Worker/XNET scheduling still provides no strict SYNC timing
 guarantee.
+
+SYNC and EMCY also accept `cob_id_offset: "NODE_ID"` alongside an explicit
+`cob_id` base. They follow the same node-relative rebasing and resolved-ID
+validation as PDOs. Accepted SDO changes override that relative startup default
+across stop/start; a communication/node reset restores and re-evaluates it.
+EMCY's omitted `cob_id` still selects its existing `0x80 + node ID` default.
 
 ## Batch ABI
 

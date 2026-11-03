@@ -70,4 +70,11 @@ if(XNET_CANOPEN_BUILD_TESTS)
         XNET_CANOPEN_LOG_PATH="${CMAKE_CURRENT_BINARY_DIR}/logging-open-failure")
     target_link_libraries(xnet_canopen_logging_tests PRIVATE Threads::Threads)
     add_test(NAME xnet_canopen_logging_tests COMMAND xnet_canopen_logging_tests)
+    find_package(Python3 3.10 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME xnet_canopen_eds_tests COMMAND "${Python3_EXECUTABLE}"
+            -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p test_eds_to_json.py)
+        set_tests_properties(xnet_canopen_eds_tests PROPERTIES
+            ENVIRONMENT "XNET_CO_MODEL_VALIDATOR=$<TARGET_FILE:xnet_canopen_tests>")
+    endif()
 endif()

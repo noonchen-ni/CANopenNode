@@ -211,6 +211,7 @@ ODR_t xnet_canopen_device::write_communication(
         // Preserve accepted EMCY routing, including its disable bit, across a
         // stop/start. An explicit communication/node reset restores JSON defaults.
         if (binding.index == 0x1014) d.model->emcy_reconfigured = true;
+        if (binding.index == 0x1005) d.model->sync_reconfigured = true;
         if (d.co->NMT->HBproducerTime_us > 0 || d.co->NGslave->lifeTime_us == 0) {
             // Stopping supervision must also clear a previously raised error.
             // HB consumer is disabled in this port, so this shared stack error

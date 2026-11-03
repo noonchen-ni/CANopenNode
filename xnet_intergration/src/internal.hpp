@@ -71,6 +71,7 @@ struct Value {
     OD_attr_t attr = 0; /**< CANopenNode access, PDO mapping, string, and multibyte attribute flags. */
     bool allows_local_write = false; /**< Allows host batch writes; independent of network SDO write permission. */
     bool is_node_relative = false; /**< Live uint32_t COB-ID is its default base plus node ID (unless unconfigured). */
+    bool default_node_relative = false; /**< Add node ID to an integer application default only when that default is restored. */
     /** Address published to OD descriptors; stable while storage is not resized. */
     void* data() { return storage.data(); }
 };
@@ -109,6 +110,7 @@ struct Model {
     uint16_t rpdo_count = 0, tpdo_count = 0; /**< Configured receive/transmit PDO counts, respectively. */
     uint32_t worker_period_us = 1000; /**< Worker wait interval in microseconds; not a hard real-time guarantee. */
     bool emcy_reconfigured = false; /**< An SDO-selected EMCY ID must survive stop/start without startup rebasing. */
+    bool sync_reconfigured = false; /**< An SDO-selected SYNC ID overrides a node-relative startup default until reset. */
     /** Construct storage/descriptors before stack allocation; not a runtime OD merge. */
     void load(const Json& root);
     /** Restore communication defaults, optionally application defaults, then resolve node-relative IDs. */

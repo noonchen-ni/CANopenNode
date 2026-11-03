@@ -119,6 +119,9 @@ XNET_CANOPEN_API int32_t xnet_canopen_destroy(xnet_canopen_handle handle);
  * without failing initialization. Sessions are not started.
  * Failure releases partial resources when possible; inspect diagnostics and
  * retry uninitialize if cleanup also fails. See README.md for the JSON schema.
+ * Generated EDS templates must have every {USER_INPUT} placeholder replaced.
+ * Optional NODE_ID offsets are resolved by the model; no expression evaluator
+ * or template substitution is performed by this API.
  * The macro-configured log file is opened before XNET sessions; logging startup
  * failure returns XNET_CO_IO_ERROR. Later logging failures are reported through
  * diagnostics/stderr without rolling back communication operations.

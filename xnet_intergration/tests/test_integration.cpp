@@ -130,6 +130,116 @@ nxFrameCAN_t guarding_request() {
     return response;
 }
 
+void node_id_offsets() {
+    auto j = xco::read_json(XNET_CO_EXAMPLE_MODEL);
+    j["objects"][0]["value"] = 100;
+    j["objects"][0]["value_offset"] = "NODE_ID";
+    j["objects"][1]["value"] = -100;
+    j["objects"][1]["value_offset"] = "NODE_ID";
+    j["objects"][4]["value_offset"] = "NODE_ID";
+    j["objects"][5]["members"][1]["value_offset"] = "NODE_ID";
+    j["tpdos"] = xco::Json::array();
+    for (int i = 0; i < 4; ++i) j["tpdos"].push_back({{"mapping", xco::Json::array()}});
+    j["tpdos"].push_back({{"cob_id", "0x1C0"}, {"cob_id_offset", "NODE_ID"},
+        {"mapping", {{{"index", "0x2000"}}}}});
+    j["emcy"] = {{"cob_id", "0x80"}, {"cob_id_offset", "NODE_ID"}};
+    j["sync"] = {{"cob_id", "0x300"}, {"cob_id_offset", "NODE_ID"}};
+    auto read = [](xco::Model& model, uint16_t index, uint8_t sub = 0) {
+        uint64_t number = 0;
+        auto& value = model.value(index, sub);
+        std::memcpy(&number, value.data(), value.size);
+        return number;
+    };
+    xco::Model model; model.load(j); model.restore(true, 10);
+    CHECK(read(model, 0x2000) == 110);
+    CHECK(read(model, 0x2001) == uint32_t(-90));
+    CHECK(read(model, 0x2004, 1) == 11);
+    CHECK(read(model, 0x2005, 1) == 52);
+    CHECK(read(model, 0x1804, 1) == 0x1ca);
+    CHECK(read(model, 0x1014) == 0x8a && read(model, 0x1005) == 0x30a);
+    *static_cast<uint16_t*>(model.value(0x2000, 0).data()) = 777;
+    model.resolve_node(42);
+    CHECK(read(model, 0x2000) == 777 && read(model, 0x1804, 1) == 0x1ea);
+    model.resolve_node(42);
+    CHECK(read(model, 0x1804, 1) == 0x1ea);
+    model.restore(false, 20);
+    CHECK(read(model, 0x2000) == 777 && read(model, 0x1804, 1) == 0x1d4);
+    model.restore(true, 20);
+    CHECK(read(model, 0x2000) == 120 && read(model, 0x2001) == uint32_t(-80));
+    model.restore(true, 255);
+    CHECK(read(model, 0x2000) == 100 && read(model, 0x1804, 1) == 0x1c0);
+    *static_cast<uint32_t*>(model.value(0x1005, 0).data()) = 0x320;
+    *static_cast<uint32_t*>(model.value(0x1014, 0).data()) = 0x90;
+    model.sync_reconfigured = model.emcy_reconfigured = true;
+    model.resolve_node(10);
+    CHECK(read(model, 0x1005) == 0x320 && read(model, 0x1014) == 0x90);
+    model.restore(false, 10);
+    CHECK(read(model, 0x1005) == 0x30a && read(model, 0x1014) == 0x8a);
+
+    auto rejects = [](const xco::Json& bad) {
+        try { xco::Model m; m.load(bad); m.restore(true, 10); }
+        catch (const std::exception&) { return true; }
+        return false;
+    };
+    auto bad = j; bad["objects"][0]["value_offset"] = "UNKNOWN"; CHECK(rejects(bad));
+    bad = j; bad["objects"][4]["values"] = xco::Json::array();
+    bad["objects"][4]["value_offset"] = "UNKNOWN"; CHECK(rejects(bad));
+    bad = j; bad["objects"][2]["value_offset"] = "NODE_ID"; CHECK(rejects(bad));
+    bad = j; bad["objects"][5]["members"][0]["value_offset"] = "NODE_ID"; CHECK(rejects(bad));
+    bad = j; bad["tpdos"][4]["cob_id_offset"] = 1; CHECK(rejects(bad));
+    bad = j; bad["tpdos"][4].erase("cob_id"); CHECK(rejects(bad));
+    bad = j; bad["tpdos"][4]["cob_id"] = "0x7FF"; CHECK(rejects(bad));
+    bad = j; bad["tpdos"][4]["cob_id"] = "0x7DA"; CHECK(rejects(bad)); // Resolves to restricted LSS ID.
+    bad = j; bad["tpdos"][4]["cob_id"] = "0x200"; CHECK(rejects(bad));
+    for (const auto& type : {"UNSIGNED8", "UNSIGNED16", "UNSIGNED32", "UNSIGNED64",
+                             "INTEGER8", "INTEGER16", "INTEGER32", "INTEGER64"}) {
+        const unsigned bits = static_cast<unsigned>(std::stoul(std::string(type).substr(type[0] == 'U' ? 8 : 7)));
+        const bool sign = type[0] == 'I';
+        const uint64_t maximum = sign ? (bits == 64 ? uint64_t(INT64_MAX) : (uint64_t(1) << (bits - 1)) - 1)
+                                     : (bits == 64 ? UINT64_MAX : (uint64_t(1) << bits) - 1);
+        bad = j;
+        bad["objects"][0]["type"] = type;
+        bad["objects"][0]["value"] = maximum - 10;
+        xco::Model boundary; boundary.load(bad); boundary.restore(true, 10);
+        CHECK(read(boundary, 0x2000) == maximum);
+        bad["objects"][0]["value"] = maximum - 9;
+        CHECK(rejects(bad));
+    }
+    bad = j; bad["node_id"] = "{USER_INPUT}";
+    try { xco::Model m; m.load(bad); CHECK(false); }
+    catch (const xco::Error& e) { CHECK(std::string(e.what()).find("/node_id: replace {USER_INPUT}") != std::string::npos); }
+
+    Fixture f; f.model(j); CHECK(f.initialize() == 0); f.start();
+    CHECK(sdo_upload(0x2000) == 110);
+    CHECK(sdo_download(0x1005, 0, 0x320, 4).Payload[0] == 0x60);
+    CHECK(xnet_canopen_stop(f.device) == 0); f.start();
+    CHECK(sdo_upload(0x1005) == 0x320 && sdo_upload(0x2000) == 110);
+    fake::inject(0, {130, 10});
+    wait_for([&] { return f.status().reset_communication_count == 1; });
+    CHECK(sdo_upload(0x1005) == 0x30a);
+    operational(f);
+    fake::clear_transmitted();
+    CHECK(xnet_canopen_request_tpdo(f.device, 5) == 0);
+    wait_for([&] {
+        for (const auto& frame : fake::transmitted()) if (frame.Identifier == 0x1ca) return true;
+        return false;
+    });
+    fake::inject(0x7e5, {4, 1, 0, 0, 0, 0, 0, 0});
+    CHECK(exchange(0x7e5, {0x11, 42, 0, 0, 0, 0, 0, 0}, 0x7e4, 0x11).Payload[1] == 0);
+    fake::inject(0x7e5, {4, 0, 0, 0, 0, 0, 0, 0});
+    fake::inject(0, {130, 10});
+    wait_for([&] { return f.status().active_node_id == 42; });
+    operational(f);
+    fake::clear_transmitted();
+    CHECK(xnet_canopen_request_tpdo(f.device, 5) == 0);
+    wait_for([&] {
+        for (const auto& frame : fake::transmitted()) if (frame.Identifier == 0x1ea) return true;
+        return false;
+    });
+    const auto value = exchange(0x62a, {0x40, 0, 0x20, 0, 0, 0, 0, 0}, 0x5aa);
+    CHECK(value.Payload[4] == 110); // Reset Communication retained the live application default.
+}
+
 void model_validation() {
     auto j = xco::read_json(XNET_CO_EXAMPLE_MODEL);
     xco::Model m; m.load(j);
@@ -1202,10 +1312,21 @@ void file_logging() {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--validate-model") {
+        try {
+            xco::Model model; model.load(xco::read_json(argv[2]));
+            model.restore(true, model.startup_node);
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << e.what() << "\n";
+            return 1;
+        }
+    }
     if (!xnet_canopen_c_header_test()) return 1;
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
-        {"model validation", model_validation}, {"startup bitrates", startup_bitrates}, {"scalar limits", scalar_limits},
+        {"model validation", model_validation}, {"NODE_ID offsets", node_id_offsets},
+        {"startup bitrates", startup_bitrates}, {"scalar limits", scalar_limits},
         {"batches and lifecycle", batches_and_lifecycle}, {"partial writes and strings", partial_and_strings},
         {"packed batch buffers", packed_batches}, {"batch argument validation and limits", batch_validation},
         {"SDO PDO EMCY NMT", protocol_basics},

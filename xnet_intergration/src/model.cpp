@@ -73,6 +73,43 @@ static uint32_t type_size(const std::string& type, const Json& j) {
     return size;
 }
 
+static bool node_offset(const Json& j, const char* key) {
+    if (!j.contains(key)) return false;
+    require(j.at(key).is_string() && j.at(key) == "NODE_ID", XNET_CO_MODEL_ERROR,
+            std::string(key) + ": expected NODE_ID");
+    return true;
+}
+
+static void check_user_inputs(const Json& j, const std::string& path = "") {
+    require(!j.is_string() || j != "{USER_INPUT}", XNET_CO_MODEL_ERROR,
+            path + ": replace {USER_INPUT} before initialization");
+    if (j.is_structured()) {
+        for (const auto& item : j.items()) check_user_inputs(item.value(), path + "/" + item.key());
+    }
+}
+
+static void apply_default_offset(Value& v, uint8_t node) {
+    const uint64_t offset = node == 255 ? 0 : node;
+    const unsigned bits = v.size * 8;
+    if (v.type.compare(0, 7, "INTEGER") == 0) {
+        int64_t base = 0;
+        std::memcpy(&base, v.initial.data(), v.size);
+        if (bits < 64 && (base & (int64_t(1) << (bits - 1)))) base -= int64_t(1) << bits;
+        const int64_t maximum = bits == 64 ? INT64_MAX : (int64_t(1) << (bits - 1)) - 1;
+        require(base <= maximum - static_cast<int64_t>(offset), XNET_CO_MODEL_ERROR,
+                v.type + ": NODE_ID offset overflows default");
+        const int64_t number = base + static_cast<int64_t>(offset);
+        std::memcpy(v.data(), &number, v.size);
+    } else {
+        uint64_t base = 0;
+        std::memcpy(&base, v.initial.data(), v.size);
+        const uint64_t maximum = bits == 64 ? UINT64_MAX : (uint64_t(1) << bits) - 1;
+        require(base <= maximum - offset, XNET_CO_MODEL_ERROR, v.type + ": NODE_ID offset overflows default");
+        const uint64_t number = base + offset;
+        std::memcpy(v.data(), &number, v.size);
+    }
+}
+
 /**
  * Validate and encode one OD subentry in aligned native little-endian storage.
  * Network permissions, PDO directions and local-write permission are independent.
@@ -80,11 +117,15 @@ static uint32_t type_size(const std::string& type, const Json& j) {
  * their live updates must go through the protocol's validated OD handlers.
  */
 static Value make_value(const Json& j, uint8_t sub, bool is_application_object) {
-    keys(j, {"subindex", "type", "size", "value", "access", "pdo", "local_write"}, "OD value");
+    keys(j, {"subindex", "type", "size", "value", "value_offset", "access", "pdo", "local_write"}, "OD value");
     Value v;
     v.sub = sub;
     v.type = j.at("type").get<std::string>();
     v.size = type_size(v.type, j);
+    v.default_node_relative = node_offset(j, "value_offset");
+    require(!v.default_node_relative || (is_application_object
+        && (v.type.compare(0, 7, "INTEGER") == 0 || v.type.compare(0, 8, "UNSIGNED") == 0)),
+        XNET_CO_MODEL_ERROR, "value_offset requires an application integer");
     v.storage.resize((v.size + 7) / 8);
     const auto access = j.value("access", std::string("rw"));
     require(access == "ro" || access == "wo" || access == "rw", XNET_CO_MODEL_ERROR, "invalid access");
@@ -153,6 +194,7 @@ static Json scalar(const char* type, const Json& value, const char* access = "ro
  * No caller retains addresses until storage/layout construction has finished.
  */
 void Model::load(const Json& root) {
+    check_user_inputs(root);
     keys(root, {"schema_version", "node_id", "bitrate_kbps", "identity", "heartbeat_ms", "worker_period_us",
                 "device_type", "objects", "rpdos", "tpdos", "node_guarding", "sync", "emcy"}, "model");
     require(unsigned_number(root.at("schema_version"), 1, "schema_version") == 1, XNET_CO_MODEL_ERROR, "unsupported schema_version");
@@ -191,12 +233,14 @@ void Model::load(const Json& root) {
     // These records describe a SYNC consumer. Period/window are observed through
     // live OD pointers; the COB-ID uses a stack callback to change its RX filter.
     const auto sync = root.value("sync", Json::object());
-    keys(sync, {"cob_id", "period_us", "window_us", "counter_overflow"}, "sync");
+    keys(sync, {"cob_id", "cob_id_offset", "period_us", "window_us", "counter_overflow"}, "sync");
+    const bool sync_relative = node_offset(sync, "cob_id_offset");
+    require(!sync_relative || sync.contains("cob_id"), XNET_CO_MODEL_ERROR, "SYNC cob_id_offset requires cob_id");
     const auto sync_id = unsigned_number(sync.value("cob_id", Json(0x80)), 0x7ff, "SYNC COB-ID");
-    require(!CO_IS_RESTRICTED_CAN_ID(sync_id), XNET_CO_MODEL_ERROR, "restricted SYNC COB-ID");
+    require(sync_relative || !CO_IS_RESTRICTED_CAN_ID(sync_id), XNET_CO_MODEL_ERROR, "restricted SYNC COB-ID");
     const auto counter = unsigned_number(sync.value("counter_overflow", Json(0)), 240, "SYNC counter overflow");
     require(counter != 1, XNET_CO_MODEL_ERROR, "SYNC counter overflow must be 0 or 2..240");
-    var(0x1005, scalar("UNSIGNED32", sync_id, "rw"));
+    var(0x1005, scalar("UNSIGNED32", sync_id, "rw")).values[0].is_node_relative = sync_relative;
     var(0x1006, scalar("UNSIGNED32", sync.value("period_us", Json(0)), "rw"));
     var(0x1007, scalar("UNSIGNED32", sync.value("window_us", Json(0)), "rw"));
     const auto guarding = root.value("node_guarding", Json::object());
@@ -214,13 +258,16 @@ void Model::load(const Json& root) {
     // is absolute, including its optional disable bit; 0x80 alone is a stack
     // sentinel for node-relative behavior and cannot represent an absolute ID.
     const auto emcy = root.value("emcy", Json::object());
-    keys(emcy, {"cob_id", "inhibit_100us"}, "emcy");
+    keys(emcy, {"cob_id", "cob_id_offset", "inhibit_100us"}, "emcy");
+    const bool emcy_relative = node_offset(emcy, "cob_id_offset");
+    require(!emcy_relative || emcy.contains("cob_id"), XNET_CO_MODEL_ERROR, "EMCY cob_id_offset requires cob_id");
     const auto emcy_id = unsigned_number(emcy.value("cob_id", Json(0x80)), UINT32_MAX, "EMCY COB-ID");
     require((emcy_id & 0x7ffff800U) == 0
-        && (!emcy.contains("cob_id") || ((emcy_id & 0x7ff) != 0x80 && !CO_IS_RESTRICTED_CAN_ID(emcy_id & 0x7ff))),
+        && (!emcy.contains("cob_id") || emcy_relative
+            || ((emcy_id & 0x7ff) != 0x80 && !CO_IS_RESTRICTED_CAN_ID(emcy_id & 0x7ff))),
         XNET_CO_MODEL_ERROR, "invalid or restricted EMCY COB-ID");
     auto& em = var(0x1014, scalar("UNSIGNED32", emcy_id, "rw"));
-    em.values[0].is_node_relative = !emcy.contains("cob_id");
+    em.values[0].is_node_relative = !emcy.contains("cob_id") || emcy_relative;
     var(0x1015, scalar("UNSIGNED16", emcy.value("inhibit_100us", Json(0)), "rw"));
     var(0x1017, scalar("UNSIGNED16", root.value("heartbeat_ms", Json(1000)), "rw"));
     std::vector<Json> identity_subs{scalar("UNSIGNED8", 4)};
@@ -238,7 +285,7 @@ void Model::load(const Json& root) {
         try {
             const auto kind = j.value("kind", std::string("var"));
             if (kind == "var") {
-                keys(j, {"index", "kind", "type", "size", "value", "access", "pdo", "local_write"}, "VAR");
+                keys(j, {"index", "kind", "type", "size", "value", "value_offset", "access", "pdo", "local_write"}, "VAR");
                 Json value = j; value.erase("index"); value.erase("kind");
                 add(index, {value}, true, true);
             } else if (kind == "record") {
@@ -248,14 +295,16 @@ void Model::load(const Json& root) {
                 for (const auto& member : members) require(member.contains("subindex"), XNET_CO_MODEL_ERROR, "record members require subindex");
                 auto& object = add(index, members, false, true);
                 auto& zero = *std::find_if(object.values.begin(), object.values.end(), [](const Value& v) { return v.sub == 0; });
-                require(zero.type == "UNSIGNED8", XNET_CO_MODEL_ERROR, "record subindex 0 must be UNSIGNED8");
+                require(zero.type == "UNSIGNED8" && !zero.default_node_relative,
+                        XNET_CO_MODEL_ERROR, "record subindex 0 must be UNSIGNED8 without an offset");
                 auto highest = std::max_element(object.values.begin(), object.values.end(),
                     [](const Value& a, const Value& b) { return a.sub < b.sub; })->sub;
                 require(*static_cast<const uint8_t*>(zero.data()) == highest && !zero.allows_local_write
                     && !(zero.attr & (ODA_SDO_W | ODA_TRPDO)), XNET_CO_MODEL_ERROR,
                     "record subindex 0 must be read-only, non-mappable, and contain the highest subindex");
             } else if (kind == "array") {
-                keys(j, {"index", "kind", "type", "size", "values", "access", "pdo", "local_write"}, "ARRAY");
+                keys(j, {"index", "kind", "type", "size", "values", "value_offset", "access", "pdo", "local_write"}, "ARRAY");
+                node_offset(j, "value_offset");
                 require(j.at("values").is_array() && j.at("values").size() <= 254, XNET_CO_MODEL_ERROR, "array requires at most 254 elements");
                 std::vector<Json> members{scalar("UNSIGNED8", j.at("values").size())};
                 // Lower arrays to record descriptors while retaining their external subindex semantics.
@@ -279,7 +328,9 @@ void Model::load(const Json& root) {
         if (is_transmit_pdo) tpdo_count = static_cast<uint16_t>(list.size()); else rpdo_count = static_cast<uint16_t>(list.size());
         for (size_t i = 0; i < list.size(); ++i) {
             const auto& j = list[i];
-            keys(j, {"cob_id", "enabled", "transmission_type", "event_ms", "inhibit_100us", "mapping"}, key);
+            keys(j, {"cob_id", "cob_id_offset", "enabled", "transmission_type", "event_ms", "inhibit_100us", "mapping"}, key);
+            const bool relative = node_offset(j, "cob_id_offset");
+            require(!relative || j.contains("cob_id"), XNET_CO_MODEL_ERROR, "PDO cob_id_offset requires cob_id");
             require(j.at("mapping").is_array() && j.at("mapping").size() <= 8,
                     XNET_CO_MODEL_ERROR, "PDO mapping requires 0..8 entries");
             require(!j.contains("enabled") || j.at("enabled").is_boolean(),
@@ -291,7 +342,8 @@ void Model::load(const Json& root) {
             require(type <= 240 || type >= 254, XNET_CO_MODEL_ERROR, "unsupported PDO transmission type");
             const auto default_id = static_cast<uint32_t>((is_transmit_pdo ? 0x180 : 0x200) + i * 0x100);
             const uint32_t cob = static_cast<uint32_t>(unsigned_number(j.value("cob_id", Json(default_id)), 0x7ff, "cob_id"));
-            require(!j.contains("cob_id") || !CO_IS_RESTRICTED_CAN_ID(cob), XNET_CO_MODEL_ERROR, "restricted PDO COB-ID");
+            require(!j.contains("cob_id") || relative || !CO_IS_RESTRICTED_CAN_ID(cob),
+                    XNET_CO_MODEL_ERROR, "restricted PDO COB-ID");
             const uint16_t comm_index = static_cast<uint16_t>((is_transmit_pdo ? 0x1800 : 0x1400) + i);
             std::vector<Json> comm{scalar("UNSIGNED8", is_transmit_pdo ? 6 : 5),
                 scalar("UNSIGNED32", cob | (enabled ? 0U : 0x80000000U)), scalar("UNSIGNED8", type)};
@@ -307,7 +359,7 @@ void Model::load(const Json& root) {
                 comm.push_back(scalar("UNSIGNED8", 0));
             }
             auto& comm_obj = add(comm_index, comm, false);
-            comm_obj.values[1].is_node_relative = !j.contains("cob_id");
+            comm_obj.values[1].is_node_relative = !j.contains("cob_id") || relative;
             std::vector<Json> mapping{scalar("UNSIGNED8", j.at("mapping").size())};
             uint32_t bytes = 0;
             for (const auto& m : j.at("mapping")) {
@@ -359,11 +411,15 @@ void Model::restore(bool reset_all_objects, uint8_t node) {
     // Reset Communication (false) restores only communication defaults, preserving
     // device data. Initialization and Reset Node (true) restore both ranges.
     for (auto& obj : objects) for (auto& v : obj->values) {
-        if (obj->index < 0x2000 || reset_all_objects) std::memcpy(v.data(), v.initial.data(), v.size);
+        if (obj->index < 0x2000 || reset_all_objects) {
+            std::memcpy(v.data(), v.initial.data(), v.size);
+            if (v.default_node_relative) apply_default_offset(v, node);
+        }
     }
     // A communication reset intentionally discards SDO-selected EMCY routing.
     // An ordinary stop/start instead retains it through resolve_node().
     emcy_reconfigured = false;
+    sync_reconfigured = false;
     // Defaults contain base COB-IDs; resolve them for the selected node after copying.
     resolve_node(node);
 }
@@ -373,11 +429,14 @@ void Model::resolve_node(uint8_t node) {
     // node-dependent COB-IDs and collision checks without resetting other OD values.
     // Only values explicitly marked is_node_relative are rewritten.
     for (auto& obj : objects) for (auto& v : obj->values) {
-        if (v.is_node_relative && !(obj->index == 0x1014 && emcy_reconfigured)) {
+        if (v.is_node_relative && !(obj->index == 0x1014 && emcy_reconfigured)
+            && !(obj->index == 0x1005 && sync_reconfigured)) {
             // Rebase from immutable defaults, not the previous node's already-resolved identifier.
             // This makes repeated resolution idempotent. Node 255 is unconfigured,
             // so retain the base identifier until LSS assigns a usable node ID.
             uint32_t base; std::memcpy(&base, v.initial.data(), 4);
+            require((base & 0x7ff) + (node == 255 ? 0 : node) <= 0x7ff, XNET_CO_MODEL_ERROR,
+                    "NODE_ID offset exceeds 11-bit COB-ID");
             base += node == 255 ? 0 : node;
             std::memcpy(v.data(), &base, 4);
         }
@@ -390,6 +449,7 @@ void Model::resolve_node(uint8_t node) {
         const uint16_t communication_indices[] = {0x1005, 0x1014};
         for (uint16_t index : communication_indices) {
             uint32_t cob; std::memcpy(&cob, value(index, 0).data(), sizeof(cob));
+            require(!CO_IS_RESTRICTED_CAN_ID(cob & 0x7ff), XNET_CO_MODEL_ERROR, "restricted communication COB-ID");
             require(identifiers.insert(cob & 0x7ff).second, XNET_CO_MODEL_ERROR, "communication COB-ID collision");
         }
         for (auto& obj : objects) {
@@ -397,6 +457,7 @@ void Model::resolve_node(uint8_t node) {
                 || (obj->index >= 0x1800 && obj->index < 0x1800 + tpdo_count)) {
                 auto& cob = value(obj->index, 1);
                 uint32_t id; std::memcpy(&id, cob.data(), 4);
+                require(!CO_IS_RESTRICTED_CAN_ID(id & 0x7ff), XNET_CO_MODEL_ERROR, "restricted PDO COB-ID");
                 require(identifiers.insert(id & 0x7ff).second, XNET_CO_MODEL_ERROR, "PDO COB-ID collides with another local CANopen service");
             }
         }

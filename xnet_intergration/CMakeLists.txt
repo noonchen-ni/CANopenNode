@@ -3,6 +3,7 @@ project(xnet_canopen VERSION 0.1.0 LANGUAGES C CXX)
 
 option(XNET_CANOPEN_BUILD_TESTS "Build hardware-independent tests with a fake XNET API" OFF)
 option(XNET_CANOPEN_BUILD_LIBRARY "Build the shared library linked to NI-XNET" ON)
+option(XNET_CANOPEN_BUILD_APP "Build the dynamically loaded device smoke-test app" ON)
 set(XNET_LIBRARY "" CACHE FILEPATH "Path to the target NI-XNET shared library")
 find_package(Threads REQUIRED)
 
@@ -49,6 +50,10 @@ if(XNET_CANOPEN_BUILD_LIBRARY)
     install(FILES include/xnet_canopen.h DESTINATION include)
 endif()
 
+if(XNET_CANOPEN_BUILD_APP)
+    add_subdirectory(tests/app)
+endif()
+
 if(XNET_CANOPEN_BUILD_TESTS)
     enable_testing()
     if(NOT XNET_CANOPEN_BUILD_LIBRARY)
@@ -70,6 +75,40 @@ if(XNET_CANOPEN_BUILD_TESTS)
         XNET_CANOPEN_LOG_PATH="${CMAKE_CURRENT_BINARY_DIR}/logging-open-failure")
     target_link_libraries(xnet_canopen_logging_tests PRIVATE Threads::Threads)
     add_test(NAME xnet_canopen_logging_tests COMMAND xnet_canopen_logging_tests)
+    if(XNET_CANOPEN_BUILD_APP AND NOT XNET_CANOPEN_BUILD_LIBRARY)
+        add_library(xnet_canopen_app_mock SHARED tests/fake_xnet.cpp)
+        target_link_libraries(xnet_canopen_app_mock PRIVATE xnet_canopen_objects Threads::Threads)
+        add_test(NAME xnet_canopen_app_smoke
+            COMMAND "${CMAKE_COMMAND}"
+                "-DAPP=$<TARGET_FILE:xnet_canopen_device>"
+                "-DLIB=$<TARGET_FILE:xnet_canopen_app_mock>"
+                "-DMODEL=${CMAKE_CURRENT_SOURCE_DIR}/examples/device.json"
+                "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/app-smoke"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/app/smoke.cmake")
+        add_executable(xnet_canopen_app_signal_tests tests/app/test_signal.cpp)
+        target_compile_features(xnet_canopen_app_signal_tests PRIVATE cxx_std_17)
+        target_link_libraries(xnet_canopen_app_signal_tests PRIVATE Threads::Threads)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/app-signals")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/app-signals/runner.json"
+            "{\"interface_name\":\"CAN1\",\"model_path\":\"${CMAKE_CURRENT_SOURCE_DIR}/examples/device.json\","
+            "\"persistence_path\":\"${CMAKE_CURRENT_BINARY_DIR}/app-signals/device.lss.json\"}")
+        add_test(NAME xnet_canopen_app_sigint COMMAND xnet_canopen_app_signal_tests
+            "$<TARGET_FILE:xnet_canopen_device>" "$<TARGET_FILE:xnet_canopen_app_mock>"
+            "${CMAKE_CURRENT_BINARY_DIR}/app-signals/runner.json"
+            "${CMAKE_CURRENT_BINARY_DIR}/app-signals/sigint.txt" INT)
+        if(UNIX)
+            add_test(NAME xnet_canopen_app_sigterm COMMAND xnet_canopen_app_signal_tests
+                "$<TARGET_FILE:xnet_canopen_device>" "$<TARGET_FILE:xnet_canopen_app_mock>"
+                "${CMAKE_CURRENT_BINARY_DIR}/app-signals/runner.json"
+                "${CMAKE_CURRENT_BINARY_DIR}/app-signals/sigterm.txt" TERM)
+        endif()
+        set_tests_properties(xnet_canopen_tests xnet_canopen_app_smoke xnet_canopen_app_sigint PROPERTIES
+            RESOURCE_LOCK xnet_canopen_app_log)
+        set_tests_properties(xnet_canopen_app_smoke xnet_canopen_app_sigint PROPERTIES TIMEOUT 30)
+        if(UNIX)
+            set_tests_properties(xnet_canopen_app_sigterm PROPERTIES RESOURCE_LOCK xnet_canopen_app_log TIMEOUT 30)
+        endif()
+    endif()
     find_package(Python3 3.10 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME xnet_canopen_eds_tests COMMAND "${Python3_EXECUTABLE}"

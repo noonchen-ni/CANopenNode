@@ -1,0 +1,5 @@
+{
+  "interface_name": "CAN1",
+  "model_path": "../../examples/device.json",
+  "persistence_path": "./device.lss.json"
+}

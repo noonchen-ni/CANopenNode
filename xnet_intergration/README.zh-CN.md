@@ -5,7 +5,7 @@
 > 本文是 [README.md](README.md) 的中文译本。如两者存在差异，以英文版为准。
 
 这是一个围绕现有 CANopenNode C 协议栈的 C++17 共享库封装，面向 NI Linux RT
-ARM64 和 VeriStand 自定义设备（Custom Device）。所有集成源代码均位于本目录中，
+AMD64（x86-64）和 VeriStand 自定义设备（Custom Device）。所有集成源代码均位于本目录中，
 未修改任何现有 CANopenNode 源文件。
 
 每个句柄拥有一个模拟设备、一个物理 XNET 接口、两个原始帧流（frame-stream）会话、
@@ -61,7 +61,7 @@ External CANopen master
 
 重要的设计选择：
 
-- 部署目标是 **NI Linux RT ARM64**。Windows 和 Linux x86-64 模拟（mock）构建
+- 部署目标是 **NI Linux RT AMD64（x86-64）**。Windows 和桌面 Linux 模拟（mock）构建
   是开发工具，不代表部署/硬件认证。
 - 每个句柄拥有一个设备和一个接口。LabVIEW 持有句柄而不是 XNET 会话，既不传递帧，
   也不调用协议处理步骤。接口/路径的独占性由调用方管理，而不是由库内注册表强制。
@@ -120,6 +120,7 @@ OD 值保持在本地，除非通过协议服务或主机 API 访问。
 - [examples/kinco.template.json](examples/kinco.template.json)：生成的 Kinco 配置模板，不是已调试完成的模型。
 - [examples/kinco.template.inputs.md](examples/kinco.template.inputs.md)：生成的字段输入说明和转换警告；与模板一起保留。
 - [tests/](tests/)：模拟 XNET API、真实协议栈测试以及 C 头文件/ABI 检查。
+- [tests/app/](tests/app/README.md)：动态加载共享库的独立从站应用、运行配置和硬件冒烟测试说明。
 
 提供的 NI 头文件、JSON 单头文件和内置的 spdlog 头文件均未经修改使用。spdlog
 及其捆绑的 fmt 以纯头文件方式编译；部署目标上不需要额外的 spdlog/fmt 共享库。
@@ -130,7 +131,8 @@ OD 值保持在本地，除非通过协议服务或主机 API 访问。
 
 需要 CMake 3.16+、支持 `std::filesystem` 的 C99/C++17 工具链（推荐 GCC 9+）、
 线程库以及目标平台的 NI-XNET 共享库。可在目标机上本地构建，或使用你的
-NI Linux RT ARM64 CMake 工具链。不要将主机架构的 XNET 库链接到 ARM64 构建中。
+NI Linux RT AMD64 CMake 工具链。请使用目标平台的 AMD64 NI-XNET 库和兼容的
+C++ 运行时；仅与桌面主机 CPU 架构相同并不能保证 NI Linux RT 兼容性。
 
 在构建机上从本目录执行：
 
@@ -141,7 +143,7 @@ cmake --build build
 ```
 
 交叉编译时，还需传入
-`-DCMAKE_TOOLCHAIN_FILE=<your-NI-Linux-RT-ARM64-toolchain-file>`。
+`-DCMAKE_TOOLCHAIN_FILE=<your-NI-Linux-RT-AMD64-toolchain-file>`。
 输出为 `libxnet_canopen.so`。部署时需附带与之匹配的 NI-XNET 和 C++ 运行时依赖。
 CMake 配置阶段不会访问真实硬件。
 
@@ -156,6 +158,15 @@ ctest --test-dir build-tests --output-on-failure
 
 模拟测试也支持 Windows/MSVC，仅用于开发，不用于部署。Linux GCC 构建还可以在
 C、C++ 和可执行文件链接器标志中使用 `-fsanitize=address,undefined`。
+
+### 独立设备应用
+
+默认同时构建 `xnet_canopen_device`，可用 `XNET_CANOPEN_BUILD_APP=OFF` 禁用。
+应用接受 `--lib` 和 `--config`，每 500 ms 输出全部十个状态字段，并在收到
+SIGINT/SIGTERM 时清理资源。可选的 `--duration <seconds>` 用于限时冒烟测试。
+运行配置指定 XNET 接口、现有模型 JSON 路径和持久化路径；相对路径基于运行配置文件
+所在目录解析。独立构建、配置示例、部署要求和模拟测试见
+[tests/app/README.md](tests/app/README.md)。该应用不实现驱动器模型。
 
 <a id="lifecycle-and-ownership"></a>
 
@@ -1025,7 +1036,7 @@ SRDO、trace 和通用 OD 存储均被禁用。
 空/禁用槽位、同步 PDO8、停止/启动、NMT 复位以及 LSS 节点变更。
 
 开发时请使用 Windows/MSVC 或 Linux x86-64/GCC 模拟构建/测试，Linux 上可使用
-ASan/UBSan。它们并不构成 NI Linux RT ARM64 硬件验收。
+ASan/UBSan。它们并不构成 NI Linux RT AMD64 硬件验收。
 
 重要限制：
 

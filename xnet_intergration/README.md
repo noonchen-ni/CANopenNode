@@ -3,7 +3,7 @@
 English | [简体中文](README.zh-CN.md)
 
 This is a C++17 shared-library wrapper around the existing CANopenNode C stack,
-intended for NI Linux RT ARM64 and a VeriStand Custom Device. All integration
+intended for NI Linux RT AMD64 (x86-64) and a VeriStand Custom Device. All integration
 sources are in this directory. No existing CANopenNode source files are changed.
 
 Each handle owns one simulated device, one physical XNET interface, two raw
@@ -60,8 +60,8 @@ External CANopen master
 
 Important design choices:
 
-- The deployment target is **NI Linux RT ARM64**. Windows and Linux x86-64
-  mock builds are development tools, not deployment/hardware certification.
+- The deployment target is **NI Linux RT AMD64 (x86-64)**. Windows and desktop
+  Linux mock builds are development tools, not deployment/hardware certification.
 - Each handle owns one device and one interface. LabVIEW holds the handle, not
   XNET sessions, and does not pass frames or call a protocol-processing step.
   Interface/path exclusivity is caller-managed, not enforced by a library registry.
@@ -128,6 +128,8 @@ behavior or engineering-unit conversions.
 - [examples/kinco.template.json](examples/kinco.template.json): generated Kinco provisioning template, not a commissioned model.
 - [examples/kinco.template.inputs.md](examples/kinco.template.inputs.md): generated field-specific inputs and conversion warnings; retained beside the template.
 - [tests/](tests/): fake XNET API, real stack protocol tests, and C header/ABI checks.
+- [tests/app/](tests/app/README.md): standalone dynamically loaded slave app,
+  runner configuration and hardware smoke-test instructions.
 
 The supplied NI header, JSON single header, and vendored spdlog headers are used
 unchanged. spdlog and its bundled fmt are compiled header-only; no additional
@@ -137,8 +139,9 @@ spdlog/fmt shared library is required on the deployment target.
 
 Requires CMake 3.16+, a C99/C++17 toolchain with `std::filesystem` support
 (GCC 9+ recommended), threads, and the target NI-XNET shared library.
-Build natively on the target, or use your NI Linux RT ARM64 CMake toolchain.
-Do not link a host-architecture XNET library into an ARM64 build.
+Build natively on the target, or use your NI Linux RT AMD64 CMake toolchain.
+Use the target's AMD64 NI-XNET library and compatible C++ runtime; matching a
+desktop host's CPU architecture alone does not establish NI Linux RT compatibility.
 
 From this directory on the build machine:
 
@@ -149,7 +152,7 @@ cmake --build build
 ```
 
 For cross-compilation, also pass
-`-DCMAKE_TOOLCHAIN_FILE=<your-NI-Linux-RT-ARM64-toolchain-file>`.
+`-DCMAKE_TOOLCHAIN_FILE=<your-NI-Linux-RT-AMD64-toolchain-file>`.
 The output is `libxnet_canopen.so`. Deploy it with its matching NI-XNET and C++
 runtime dependencies. No real hardware access occurs at CMake configuration time.
 
@@ -165,6 +168,16 @@ ctest --test-dir build-tests --output-on-failure
 The mock tests also support Windows/MSVC for development, not for deployment.
 Linux GCC builds can additionally use `-fsanitize=address,undefined` in the C,
 C++, and executable linker flags.
+
+### Standalone device app
+
+The build also produces `xnet_canopen_device` by default
+(`XNET_CANOPEN_BUILD_APP=OFF` disables it). It accepts `--lib` and `--config`,
+prints all ten status fields every 500 ms, and cleans up on SIGINT/SIGTERM.
+Optional `--duration <seconds>` supports bounded smoke tests. The runner config
+specifies the XNET interface, existing model JSON path and persistence path.
+See [tests/app/README.md](tests/app/README.md) for standalone builds, examples,
+deployment requirements and mock tests. It does not implement a drive model.
 
 ## Lifecycle and ownership
 
@@ -1193,7 +1206,7 @@ explicit-ID requirements, higher-slot collisions (including live SYNC/EMCY write
 empty/disabled slots, synchronous PDO8, stop/start, NMT resets and LSS node changes.
 
 Use Windows/MSVC or Linux x86-64/GCC mock builds/tests for development, with
-ASan/UBSan available on Linux. These do not establish NI Linux RT ARM64
+ASan/UBSan available on Linux. These do not establish NI Linux RT AMD64
 hardware acceptance.
 
 Important limits:

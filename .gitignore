@@ -13,3 +13,6 @@ doc/html/
 
 #kdevelop
 *.kdev4
+
+build
+__pycache__

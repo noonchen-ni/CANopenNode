@@ -466,6 +466,48 @@ void partial_and_strings() {
     CHECK(std::strcmp(reinterpret_cast<char*>(text), "manual") == 0);
 }
 
+void single_od_access() {
+    Fixture f;
+    uint8_t bytes[32]{}; uint32_t size = 0;
+    CHECK(xnet_canopen_read_od(f.device, 0x2000, 0, bytes, 2, &size) == XNET_CO_INVALID_STATE);
+    CHECK(f.initialize() == 0);
+    CHECK(xnet_canopen_read_od(f.device, 0x2000, 0, bytes, 2, nullptr) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_read_od(f.device, 0x2000, 0, nullptr, 2, &size) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_read_od(f.device, 0x2000, 255, bytes, 2, &size) == XNET_CO_NOT_FOUND);
+    CHECK(xnet_canopen_clear_error(f.device) == 0);
+    CHECK(xnet_canopen_read_od(f.device, 0x2003, 0, nullptr, 0, &size) == XNET_CO_BUFFER_TOO_SMALL && size == 32);
+    CHECK(f.device->error_code == 0);
+    CHECK(xnet_canopen_read_od(f.device, 0x2000, 0, bytes, 1, &size) == XNET_CO_BUFFER_TOO_SMALL && size == 2);
+
+    const uint8_t value[2] = {0x34, 0x12};
+    CHECK(xnet_canopen_write_od(f.device, 0x2000, 0, value, 1) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_write_od(f.device, 0x2000, 0, value, 4) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_write_od(f.device, 0x2000, 0, nullptr, 2) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_write_od(f.device, 0x2000, 0, value, 2) == 0);
+    CHECK(xnet_canopen_read_od(f.device, 0x2000, 0, bytes, sizeof(bytes), &size) == 0);
+    CHECK(size == 2 && bytes[0] == 0x34 && bytes[1] == 0x12);
+    auto batch = f.bind({{0x2000, 0, 2}});
+    int32_t status = -99;
+    CHECK(xnet_canopen_read_batch(f.device, batch, bytes, 2, &status, 1) == 0 && bytes[0] == 0x34);
+
+    // Same permission and validation rules as batch entries.
+    const uint8_t serial[4] = {9, 0, 0, 0};
+    CHECK(xnet_canopen_write_od(f.device, 0x1018, 1, serial, 4) == XNET_CO_ACCESS_ERROR);
+    CHECK(f.device->error_code == XNET_CO_ACCESS_ERROR);
+    uint8_t text[32]; std::memset(text, 'a', 32);
+    CHECK(xnet_canopen_write_od(f.device, 0x2003, 0, text, 32) == XNET_CO_ACCESS_ERROR);
+    std::memset(text, 0, 32); std::memcpy(text, "single", 6);
+    CHECK(xnet_canopen_write_od(f.device, 0x2003, 0, text, 32) == 0);
+    std::memset(text, 0, 32);
+    CHECK(xnet_canopen_read_od(f.device, 0x2003, 0, text, 32, &size) == 0);
+    CHECK(std::strcmp(reinterpret_cast<char*>(text), "single") == 0);
+
+    f.start();
+    CHECK(xnet_canopen_read_od(f.device, 0x2000, 0, bytes, 2, &size) == 0 && bytes[0] == 0x34);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    CHECK(xnet_canopen_write_od(f.device, 0x2000, 0, value, 2) == XNET_CO_INVALID_STATE);
+}
+
 void protocol_basics() {
     Fixture f; CHECK(f.initialize() == 0); f.start();
     auto answer = exchange(0x60a, {0x40, 0x18, 0x10, 1, 0, 0, 0, 0}, 0x58a);
@@ -1328,6 +1370,7 @@ int main(int argc, char** argv) {
         {"model validation", model_validation}, {"NODE_ID offsets", node_id_offsets},
         {"startup bitrates", startup_bitrates}, {"scalar limits", scalar_limits},
         {"batches and lifecycle", batches_and_lifecycle}, {"partial writes and strings", partial_and_strings},
+        {"single OD access", single_od_access},
         {"packed batch buffers", packed_batches}, {"batch argument validation and limits", batch_validation},
         {"SDO PDO EMCY NMT", protocol_basics},
         {"eight PDO validation", eight_pdo_validation}, {"eight PDO traffic and lifecycle", eight_pdo_traffic},

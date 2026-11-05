@@ -206,6 +206,27 @@ XNET_CANOPEN_API int32_t xnet_canopen_write_batch(
     uint32_t buffer_size, int32_t* entry_status, uint32_t entry_count);
 
 /**
+ * Read one OD variable without binding, for diagnostics and tests.
+ * Lifecycle, lock, permission, and callback rules match one read_batch entry;
+ * the entry result is returned directly. value_size is required and receives the
+ * exact OD length once the variable is found. NULL buffer with capacity 0 queries
+ * the size and returns BUFFER_TOO_SMALL without changing diagnostics.
+ * Each call locks separately; use read_batch for cyclic or consistent multi-value I/O.
+ */
+XNET_CANOPEN_API int32_t xnet_canopen_read_od(
+    xnet_canopen_handle handle, uint16_t index, uint8_t subindex,
+    uint8_t* buffer, uint32_t buffer_size, uint32_t* value_size);
+
+/**
+ * Write one OD variable without binding, for diagnostics and tests.
+ * buffer_size must equal the exact OD length. Permission, validation, and
+ * no-TPDO/no-EMCY rules match one write_batch entry; the result is returned directly.
+ */
+XNET_CANOPEN_API int32_t xnet_canopen_write_od(
+    xnet_canopen_handle handle, uint16_t index, uint8_t subindex,
+    const uint8_t* buffer, uint32_t buffer_size);
+
+/**
  * Request one enabled TPDO by one-based number on a running Operational node.
  * Types 254/255 obey inhibit time; type 0 waits for SYNC. Other types and requests
  * during bitrate switching are rejected. Requests may coalesce; success means

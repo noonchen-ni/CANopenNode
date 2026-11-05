@@ -556,17 +556,43 @@ int32_t xnet_canopen_bind_batch(xnet_canopen_handle handle, const uint16_t* indi
     });
 }
 
+static void require_od_access(xnet_canopen_device& d) {
+    d.initialized();
+    require(d.state != XNET_CO_RUNTIME_FAILED, XNET_CO_INVALID_STATE, "device failed; inspect diagnostics and uninitialize");
+}
+
+/**
+ * Per-entry OD access shared by batch and single-entry calls; caller holds the
+ * runtime lock and has validated buffer size against v.size. Fresh OD streams
+ * preserve service callbacks after resets and between transfers.
+ */
+static int32_t entry_io(xnet_canopen_device& d, uint16_t index, uint8_t subindex, const xco::Value& v,
+                        uint8_t* read_buffer, const uint8_t* write_buffer, bool is_write) {
+    // Local-write ownership is separate from network SDO permissions.
+    // Local reads currently still require the network SDO-readable flag.
+    if ((is_write && !v.allows_local_write) || (!is_write && !(v.attr & ODA_SDO_R))) return XNET_CO_ACCESS_ERROR;
+    OD_IO_t io{};
+    // Stack resets replace extensions. Resolve a fresh stream rather than caching callbacks.
+    auto result = OD_getSub(OD_find(&d.model->od, index), subindex, &io, false);
+    OD_size_t transferred = 0;
+    if (result == ODR_OK) {
+        if (is_write && v.type == "BOOLEAN" && write_buffer[0] > 1) result = ODR_INVALID_VALUE;
+        else if (is_write && v.type == "VISIBLE_STRING" && !std::memchr(write_buffer, 0, v.size)) result = ODR_INVALID_VALUE;
+        else if (is_write) result = io.write(&io.stream, write_buffer, v.size, &transferred);
+        else result = io.read(&io.stream, read_buffer, v.size, &transferred);
+    }
+    return result == ODR_OK && transferred == v.size ? XNET_CO_OK : XNET_CO_ACCESS_ERROR;
+}
+
 /**
  * Shared batch executor. Validate the whole buffer/layout before touching values,
  * then attempt every entry independently under one runtime lock. This prevents
  * worker interleaving, not partial commits: earlier writes are not rolled back.
- * Fresh OD streams preserve service callbacks after resets and between transfers.
  */
 static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* read_buffer, const uint8_t* write_buffer,
                         uint32_t buffer_size, int32_t* statuses, uint32_t count, bool is_write) {
     return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
-        d.initialized();
-        require(d.state != XNET_CO_RUNTIME_FAILED, XNET_CO_INVALID_STATE, "device failed; inspect diagnostics and uninitialize");
+        require_od_access(d);
         auto found = d.batches.find(batch_id);
         require(found != d.batches.end(), XNET_CO_NOT_FOUND, "unknown or invalidated batch ID");
         const auto& batch = found->second;
@@ -575,27 +601,9 @@ static int32_t batch_io(xnet_canopen_handle handle, uint32_t batch_id, uint8_t* 
         require(buffer_size >= batch.size, XNET_CO_BUFFER_TOO_SMALL, "batch buffer too small");
         bool has_entry_errors = false;
         for (uint32_t i = 0; i < count; ++i) {
-            statuses[i] = XNET_CO_OK;
             const auto& b = batch.bindings[i];
-            auto& v = d.model->value(b.index, b.subindex);
-            // Local-write ownership is separate from network SDO permissions.
-            // Local reads currently still require the network SDO-readable flag.
-            if ((is_write && !v.allows_local_write) || (!is_write && !(v.attr & ODA_SDO_R))) {
-                statuses[i] = XNET_CO_ACCESS_ERROR;
-            } else {
-                OD_IO_t io{};
-                // Stack resets replace extensions. Resolve a fresh stream rather than caching callbacks.
-                auto result = OD_getSub(OD_find(&d.model->od, b.index), b.subindex, &io, false);
-                OD_size_t transferred = 0;
-                if (result == ODR_OK) {
-                    if (is_write && v.type == "BOOLEAN" && write_buffer[b.offset] > 1) result = ODR_INVALID_VALUE;
-                    else if (is_write && v.type == "VISIBLE_STRING"
-                        && !std::memchr(write_buffer + b.offset, 0, b.size)) result = ODR_INVALID_VALUE;
-                    else if (is_write) result = io.write(&io.stream, write_buffer + b.offset, b.size, &transferred);
-                    else result = io.read(&io.stream, read_buffer + b.offset, b.size, &transferred);
-                }
-                if (result != ODR_OK || transferred != b.size) statuses[i] = XNET_CO_ACCESS_ERROR;
-            }
+            statuses[i] = entry_io(d, b.index, b.subindex, d.model->value(b.index, b.subindex),
+                is_write ? nullptr : read_buffer + b.offset, is_write ? write_buffer + b.offset : nullptr, is_write);
             if (statuses[i] < 0) {
                 has_entry_errors = true;
                 d.fail(statuses[i], "batch entry " + std::to_string(i) + " OD " + std::to_string(b.index)
@@ -613,6 +621,33 @@ int32_t xnet_canopen_read_batch(xnet_canopen_handle handle, uint32_t id, uint8_t
 int32_t xnet_canopen_write_batch(xnet_canopen_handle handle, uint32_t id, const uint8_t* buffer,
                                 uint32_t size, int32_t* statuses, uint32_t count) {
     return batch_io(handle, id, nullptr, buffer, size, statuses, count, true);
+}
+int32_t xnet_canopen_read_od(xnet_canopen_handle handle, uint16_t index, uint8_t subindex,
+                            uint8_t* buffer, uint32_t buffer_size, uint32_t* value_size) {
+    return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) -> int32_t {
+        require_od_access(d);
+        require(value_size && (buffer || buffer_size == 0), XNET_CO_INVALID_ARGUMENT, "invalid OD read arguments");
+        const auto& v = d.model->value(index, subindex);
+        *value_size = v.size;
+        // A size query must not replace the latest diagnostic.
+        if (!buffer) return XNET_CO_BUFFER_TOO_SMALL;
+        require(buffer_size >= v.size, XNET_CO_BUFFER_TOO_SMALL, "OD read buffer too small");
+        const auto result = entry_io(d, index, subindex, v, buffer, nullptr, false);
+        if (result < 0) d.fail(result, "OD " + std::to_string(index) + ":" + std::to_string(subindex) + " read failed");
+        return result;
+    });
+}
+int32_t xnet_canopen_write_od(xnet_canopen_handle handle, uint16_t index, uint8_t subindex,
+                             const uint8_t* buffer, uint32_t buffer_size) {
+    return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) -> int32_t {
+        require_od_access(d);
+        require(buffer != nullptr, XNET_CO_INVALID_ARGUMENT, "OD write buffer is required");
+        const auto& v = d.model->value(index, subindex);
+        require(buffer_size == v.size, XNET_CO_INVALID_ARGUMENT, "OD write size must equal the OD length");
+        const auto result = entry_io(d, index, subindex, v, nullptr, buffer, true);
+        if (result < 0) d.fail(result, "OD " + std::to_string(index) + ":" + std::to_string(subindex) + " write failed");
+        return result;
+    });
 }
 int32_t xnet_canopen_request_tpdo(xnet_canopen_handle handle, uint16_t number) {
     return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {

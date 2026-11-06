@@ -501,24 +501,27 @@ SYNC 和 EMCY 也接受与显式 `cob_id` 基值配合的 `cob_id_offset: "NODE_
 
 ## 批量 ABI
 
-绑定使用三个数值数组：uint16 索引、uint8 子索引和 uint32 大小。每个数组有 `count`
+绑定输入为 uint16 索引和 uint8 子索引数组，输出为 uint32 类型和大小数组。类型为
+公开枚举中的 `XNET_CO_TYPE_*` 标准 CANopen 类型代码，数组存储固定为 uint32。
+每个数组有 `count`
 个元素。在 LabVIEW 中，将它们配置为以 **Array Data Pointer** 传递的数值数组，而不是
 数组句柄或簇数组。调用前请校验数组长度：C 接收的是指针，而不是数组维度。
 `get_status()` 描述符包含十个 uint32 字段（40 字节）；它与批量操作返回的逐条目
 int32 状态数组是分开的。
 
-`bind_batch()` 复制这些数组，并校验精确的 OD 长度、OD 地址互不相同、绑定数 <=4096
-以及总大小 <=1 MiB。值按数组顺序占用连续的字节槽位，没有填充：offset[i] 是 i 之前
+`bind_batch()` 从已初始化的模型获取类型和精确的 OD 长度，校验 OD 地址互不相同、
+绑定数 <=4096 以及总大小 <=1 MiB，并返回总缓冲区字节数和批次 ID。失败时所有输出
+保持不变。值按数组顺序占用连续的字节槽位，没有填充：offset[i] 是 i 之前
 所有大小之和。偏移在内部计算，而不是由调用方提供。为了获得最低的运行时延迟，请在
 启动前配置好组。
 
 ```c
 uint16_t indices[] = {0x2000, 0x2001};
 uint8_t subindices[] = {0, 0};
-uint32_t sizes[] = {2, 4};
-uint32_t batch;
+uint32_t types[2], sizes[2];
+uint32_t buffer_size, batch;
 int32_t result = xnet_canopen_bind_batch(
-    handle, indices, subindices, sizes, 2, &batch);
+  handle, indices, subindices, 2, types, sizes, &buffer_size, &batch);
 /* Check result before using batch. */
 uint8_t buffer[6] = {0x34, 0x12, 0, 0, 0, 0};
 int32_t entry_status[2];
@@ -526,8 +529,13 @@ result = xnet_canopen_write_batch(
     handle, batch, buffer, sizeof(buffer), entry_status, 2);
 ```
 
-所有数值均使用小端编码；REAL32/64 使用 IEEE-754。字符串使用固定槽位，批量写入
-VISIBLE_STRING 时必须包含 NUL。缓冲区/数组由调用方拥有，库不会保留。`buffer_size`
+所有数值均使用小端编码；REAL32/64 使用 IEEE-754。字符串使用固定槽位。
+可按返回的 `buffer_size` 分配 U8 缓冲区，并缓存类型和大小直到 uninitialize。
+LabVIEW 中可用 Variant 数组保存值，用类型代码选择 Case Structure 分支，先校验所有值
+再编码。保留整数类型，不要统一转换为 DBL，以免丢失 64 位整数精度。检查整数范围，
+BOOLEAN 编码为 0/1，字符串以 NUL 结尾并补零，字节串要求精确长度。读取时使用同一
+布局解码，且仅使用条目状态成功的值。
+批量写入 VISIBLE_STRING 时必须包含 NUL。缓冲区/数组由调用方拥有，库不会保留。`buffer_size`
 是字节容量，至少为所绑定大小之和（示例中为 6）。`entry_status` 是调用方分配的 int32
 输出数组：元素 i 报告绑定变量 i 的结果。`entry_count` 是其元素个数而非字节数，且必须
 等于绑定变量的个数（示例中为 2）。在 LabVIEW 中，将字节缓冲区和状态数组作为数值

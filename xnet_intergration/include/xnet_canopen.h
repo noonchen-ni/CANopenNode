@@ -48,6 +48,23 @@ enum {
     XNET_CO_INTERNAL_ERROR = -11   /**< Allocation or another unexpected internal operation failed. */
 };
 
+/** Standard CANopen data type codes; API type arrays use uint32_t storage. */
+typedef enum {
+    XNET_CO_TYPE_BOOLEAN = 0x0001,
+    XNET_CO_TYPE_INTEGER8 = 0x0002,
+    XNET_CO_TYPE_INTEGER16 = 0x0003,
+    XNET_CO_TYPE_INTEGER32 = 0x0004,
+    XNET_CO_TYPE_UNSIGNED8 = 0x0005,
+    XNET_CO_TYPE_UNSIGNED16 = 0x0006,
+    XNET_CO_TYPE_UNSIGNED32 = 0x0007,
+    XNET_CO_TYPE_REAL32 = 0x0008,
+    XNET_CO_TYPE_VISIBLE_STRING = 0x0009,
+    XNET_CO_TYPE_OCTET_STRING = 0x000A,
+    XNET_CO_TYPE_REAL64 = 0x0011,
+    XNET_CO_TYPE_INTEGER64 = 0x0015,
+    XNET_CO_TYPE_UNSIGNED64 = 0x001B
+} xnet_canopen_data_type_t;
+
 /** Values of xnet_canopen_status_t.runtime_state; independent of CANopen NMT state. */
 enum {
     XNET_CO_RUNTIME_UNINITIALIZED = 0, /**< Context exists without an initialized device. */
@@ -153,10 +170,12 @@ XNET_CANOPEN_API int32_t xnet_canopen_start(xnet_canopen_handle handle);
 XNET_CANOPEN_API int32_t xnet_canopen_stop(xnet_canopen_handle handle);
 
 /**
- * Bind 1..4096 distinct OD variables using three required numeric arrays.
- * indices, subindices, and sizes each contain count elements; sizes must match
- * exact OD lengths, including full string slots. The library copies the values
- * and returns a batch ID through the required batch_id output.
+ * Bind 1..4096 distinct OD variables while initialized and not FAILED.
+ * indices/subindices are inputs; types/sizes are required caller-allocated
+ * uint32 output arrays. Each array has count elements. Types are XNET_CO_TYPE_*
+ * codes; sizes are exact model lengths, including full string slots and NUL
+ * capacity. buffer_size receives their sum; batch_id receives the new ID.
+ * All outputs remain unchanged on failure. No caller array pointer is retained.
  * Buffer slots follow array order, tightly packed without padding: offset[i] is
  * the sum of preceding sizes. Total size must be <=1 MiB.
  * IDs survive stop/start and master resets, but not uninitialize. Prefer binding
@@ -167,8 +186,8 @@ XNET_CANOPEN_API int32_t xnet_canopen_stop(xnet_canopen_handle handle);
  */
 XNET_CANOPEN_API int32_t xnet_canopen_bind_batch(
     xnet_canopen_handle handle, const uint16_t* indices,
-    const uint8_t* subindices, const uint32_t* sizes, uint32_t count,
-    uint32_t* batch_id);
+    const uint8_t* subindices, uint32_t count, uint32_t* types,
+    uint32_t* sizes, uint32_t* buffer_size, uint32_t* batch_id);
 
 /**
  * Read a bound group while initialized and not FAILED.

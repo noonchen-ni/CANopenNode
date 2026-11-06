@@ -69,8 +69,12 @@ struct Fixture {
             sizes.push_back(b.size);
         }
         uint32_t id = 0;
-        CHECK(xnet_canopen_bind_batch(device, indices.data(), subindices.data(), sizes.data(),
-                                     static_cast<uint32_t>(bindings.size()), &id) == 0);
+        std::vector<uint32_t> types(bindings.size()), actual_sizes(bindings.size());
+        uint32_t buffer_size = 0;
+        CHECK(xnet_canopen_bind_batch(device, indices.data(), subindices.data(),
+                         static_cast<uint32_t>(bindings.size()), types.data(), actual_sizes.data(),
+                         &buffer_size, &id) == 0);
+        CHECK(actual_sizes == sizes);
         return id;
     }
     xnet_canopen_status_t status() {
@@ -366,8 +370,12 @@ void packed_batches() {
     uint16_t indices[] = {0x2011, 0x2010, 0x2002, 0x2003};
     uint8_t subindices[] = {0, 0, 0, 0};
     uint32_t sizes[] = {1, 8, 4, 32};
+    uint32_t types[4]{}, buffer_size = 0;
     uint32_t batch = 0;
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 4, &batch) == 0);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 4, types, sizes, &buffer_size, &batch) == 0);
+    CHECK(buffer_size == 45 && sizes[0] == 1 && sizes[1] == 8 && sizes[2] == 4 && sizes[3] == 32);
+    CHECK(types[0] == XNET_CO_TYPE_BOOLEAN && types[1] == XNET_CO_TYPE_UNSIGNED64
+        && types[2] == XNET_CO_TYPE_REAL32 && types[3] == XNET_CO_TYPE_VISIBLE_STRING);
     indices[0] = 0; subindices[1] = 255; sizes[2] = 0;
     uint8_t source[47]{};
     source[0] = 0xa5; source[46] = 0x5a;
@@ -400,25 +408,27 @@ void batch_validation() {
     f.model(j); CHECK(f.initialize() == 0);
     uint16_t indices[] = {0x2000, 0x2001};
     uint8_t subindices[] = {0, 0};
-    uint32_t sizes[] = {2, 4};
+    uint32_t sizes[] = {99, 99};
+    uint32_t types[] = {99, 99}, buffer_size = 99;
     uint32_t batch = 0xabcdef;
-    CHECK(xnet_canopen_bind_batch(f.device, nullptr, subindices, sizes, 2, &batch) == XNET_CO_INVALID_ARGUMENT);
-    CHECK(xnet_canopen_bind_batch(f.device, indices, nullptr, sizes, 2, &batch) == XNET_CO_INVALID_ARGUMENT);
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, nullptr, 2, &batch) == XNET_CO_INVALID_ARGUMENT);
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 2, nullptr) == XNET_CO_INVALID_ARGUMENT);
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 0, &batch) == XNET_CO_INVALID_ARGUMENT);
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 4097, &batch) == XNET_CO_INVALID_ARGUMENT);
-    sizes[0] = 0;
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 2, &batch) == XNET_CO_INVALID_ARGUMENT);
-    sizes[0] = UINT32_MAX;
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 2, &batch) == XNET_CO_INVALID_ARGUMENT);
-    sizes[0] = 2; indices[1] = indices[0]; sizes[1] = 2;
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 2, &batch) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_bind_batch(f.device, nullptr, subindices, 2, types, sizes, &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, nullptr, 2, types, sizes, &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 2, nullptr, sizes, &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 2, types, nullptr, &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 2, types, sizes, nullptr, &batch) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 2, types, sizes, &buffer_size, nullptr) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 0, types, sizes, &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 4097, types, sizes, &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT);
+    indices[1] = indices[0];
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 2, types, sizes, &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT);
     subindices[1] = 255;
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 2, &batch) == XNET_CO_NOT_FOUND);
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 2, types, sizes, &buffer_size, &batch) == XNET_CO_NOT_FOUND);
     CHECK(batch == 0xabcdef);
-    indices[1] = 0x2001; subindices[1] = 0; sizes[1] = 4;
-    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, sizes, 2, &batch) == 0);
+    CHECK(types[0] == 99 && types[1] == 99 && sizes[0] == 99 && sizes[1] == 99 && buffer_size == 99);
+    indices[1] = 0x2001; subindices[1] = 0;
+    CHECK(xnet_canopen_bind_batch(f.device, indices, subindices, 2, types, sizes, &buffer_size, &batch) == 0);
+    CHECK(types[0] == XNET_CO_TYPE_UNSIGNED16 && types[1] == XNET_CO_TYPE_INTEGER32);
+    CHECK(sizes[0] == 2 && sizes[1] == 4 && buffer_size == 6);
     uint8_t bytes[6] = {0x55};
     int32_t statuses[3] = {-99, -99, -99};
     CHECK(xnet_canopen_write_batch(f.device, batch, bytes, 5, statuses, 2) == XNET_CO_BUFFER_TOO_SMALL);
@@ -435,13 +445,15 @@ void batch_validation() {
     std::vector<uint16_t> large_indices;
     std::vector<uint8_t> large_subindices(257, 0);
     std::vector<uint32_t> large_sizes(257, 4096);
+    std::vector<uint32_t> large_types(257, 99);
     for (uint16_t i = 0; i < 257; ++i) large_indices.push_back(0x3000 + i);
     CHECK(xnet_canopen_bind_batch(f.device, large_indices.data(), large_subindices.data(),
-                                 large_sizes.data(), 256, &batch) == 0);
+                                 256, large_types.data(), large_sizes.data(), &buffer_size, &batch) == 0);
+    CHECK(buffer_size == 1024 * 1024 && large_types[255] == XNET_CO_TYPE_OCTET_STRING);
     const auto full_batch = batch;
     CHECK(xnet_canopen_bind_batch(f.device, large_indices.data(), large_subindices.data(),
-                                 large_sizes.data(), 257, &batch) == XNET_CO_INVALID_ARGUMENT);
-    CHECK(batch == full_batch);
+                                 257, large_types.data(), large_sizes.data(), &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT);
+    CHECK(batch == full_batch && buffer_size == 1024 * 1024 && large_types[256] == 99);
     std::vector<uint8_t> full_buffer(1024 * 1024, 0xff);
     std::vector<int32_t> full_status(256, -99);
     CHECK(xnet_canopen_read_batch(f.device, full_batch, full_buffer.data(),

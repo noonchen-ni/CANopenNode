@@ -530,27 +530,44 @@ int32_t xnet_canopen_stop(xnet_canopen_handle handle) {
 }
 
 int32_t xnet_canopen_bind_batch(xnet_canopen_handle handle, const uint16_t* indices,
-                               const uint8_t* subindices, const uint32_t* sizes,
-                               uint32_t count, uint32_t* batch_id) {
+                               const uint8_t* subindices, uint32_t count, uint32_t* types,
+                               uint32_t* sizes, uint32_t* buffer_size, uint32_t* batch_id) {
     return call(handle, [&](xnet_canopen_device& d, std::unique_lock<std::recursive_mutex>&) {
         d.initialized();
-        require(indices && subindices && sizes && batch_id && count > 0 && count <= 4096,
+        require(d.state != XNET_CO_RUNTIME_FAILED, XNET_CO_INVALID_STATE, "device failed; inspect diagnostics and uninitialize");
+        require(indices && subindices && types && sizes && buffer_size && batch_id && count > 0 && count <= 4096,
                 XNET_CO_INVALID_ARGUMENT, "invalid batch arguments");
         require(d.next_batch != 0, XNET_CO_INVALID_STATE, "batch ID space exhausted");
+        static const std::map<std::string, uint32_t> type_codes = {
+            {"BOOLEAN", XNET_CO_TYPE_BOOLEAN}, {"INTEGER8", XNET_CO_TYPE_INTEGER8},
+            {"INTEGER16", XNET_CO_TYPE_INTEGER16}, {"INTEGER32", XNET_CO_TYPE_INTEGER32},
+            {"INTEGER64", XNET_CO_TYPE_INTEGER64}, {"UNSIGNED8", XNET_CO_TYPE_UNSIGNED8},
+            {"UNSIGNED16", XNET_CO_TYPE_UNSIGNED16}, {"UNSIGNED32", XNET_CO_TYPE_UNSIGNED32},
+            {"UNSIGNED64", XNET_CO_TYPE_UNSIGNED64}, {"REAL32", XNET_CO_TYPE_REAL32},
+            {"REAL64", XNET_CO_TYPE_REAL64}, {"VISIBLE_STRING", XNET_CO_TYPE_VISIBLE_STRING},
+            {"OCTET_STRING", XNET_CO_TYPE_OCTET_STRING}};
         xco::Batch batch;
+        std::vector<uint32_t> resolved_types;
         for (uint32_t i = 0; i < count; ++i) {
             // Slots are byte-packed; scalar alignment must not add padding.
-            const xco::Binding b{indices[i], subindices[i], batch.size, sizes[i]};
-            auto& v = d.model->value(b.index, b.subindex);
-            require(b.size == v.size && b.size <= 1024 * 1024 - batch.size,
-                    XNET_CO_INVALID_ARGUMENT, "batch OD length mismatch or total size exceeds 1 MiB");
+            const auto& value = d.model->value(indices[i], subindices[i]);
+            const xco::Binding b{indices[i], subindices[i], batch.size, value.size};
+            require(b.size <= 1024 * 1024 - batch.size,
+                    XNET_CO_INVALID_ARGUMENT, "batch total size exceeds 1 MiB");
             for (const auto& previous : batch.bindings) {
                 require(b.index != previous.index || b.subindex != previous.subindex, XNET_CO_INVALID_ARGUMENT, "duplicate batch OD variable");
             }
             batch.size += b.size;
             batch.bindings.push_back(b);
+            resolved_types.push_back(type_codes.at(value.type));
         }
-        d.batches.emplace(d.next_batch, std::move(batch));
+        const auto inserted = d.batches.emplace(d.next_batch, std::move(batch));
+        const auto& stored = inserted.first->second;
+        for (uint32_t i = 0; i < count; ++i) {
+            types[i] = resolved_types[i];
+            sizes[i] = stored.bindings[i].size;
+        }
+        *buffer_size = stored.size;
         *batch_id = d.next_batch++;
         return XNET_CO_OK;
     });

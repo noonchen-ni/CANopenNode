@@ -577,15 +577,19 @@ EMCY's omitted `cob_id` still selects its existing `0x80 + node ID` default.
 
 ## Batch ABI
 
-Binding uses three numeric arrays: uint16 indices, uint8 subindices, and uint32
-sizes. Each has `count` elements. In LabVIEW configure these as numeric arrays
+Binding takes uint16 indices and uint8 subindices as inputs and returns uint32
+types and sizes as output arrays. Each has `count` elements. Types are the standard
+CANopen codes named by `XNET_CO_TYPE_*` in the public enum; their array storage is
+always uint32, not compiler-dependent enum storage. In LabVIEW configure these as numeric arrays
 passed by **Array Data Pointer**, not array handles or arrays of clusters.
 Validate array lengths before calling: C receives pointers, not array dimensions.
 The `get_status()` descriptor has ten uint32 fields (40 bytes); it is separate
 from the per-entry int32 status array returned by batch operations.
 
-`bind_batch()` copies the arrays and validates exact OD lengths, distinct OD
-addresses, <=4096 bindings, and a total size <=1 MiB. Values occupy consecutive
+`bind_batch()` derives exact lengths and types from the initialized model, validates
+distinct OD addresses, <=4096 bindings, and a total size <=1 MiB, and returns the
+total byte capacity and batch ID. All outputs remain unchanged on failure.
+Values occupy consecutive
 byte slots in array order, with no padding: offset[i] is the sum of sizes before
 i. Offsets are calculated internally, not supplied by the caller.
 Configure groups before starting for lowest runtime latency.
@@ -593,10 +597,10 @@ Configure groups before starting for lowest runtime latency.
 ```c
 uint16_t indices[] = {0x2000, 0x2001};
 uint8_t subindices[] = {0, 0};
-uint32_t sizes[] = {2, 4};
-uint32_t batch;
+uint32_t types[2], sizes[2];
+uint32_t buffer_size, batch;
 int32_t result = xnet_canopen_bind_batch(
-    handle, indices, subindices, sizes, 2, &batch);
+  handle, indices, subindices, 2, types, sizes, &buffer_size, &batch);
 /* Check result before using batch. */
 uint8_t buffer[6] = {0x34, 0x12, 0, 0, 0, 0};
 int32_t entry_status[2];
@@ -605,6 +609,13 @@ result = xnet_canopen_write_batch(
 ```
 
 All numeric values use little-endian encoding; REAL32/64 use IEEE-754.
+Allocate a U8 buffer of the returned `buffer_size` and cache the types/sizes until
+uninitialize. A LabVIEW serializer can use a Case Structure keyed by type and an
+array of Variant values: validate every value, then encode each into its fixed slot.
+Preserve signed/unsigned integer types instead of converting all values through DBL,
+which cannot exactly represent every 64-bit integer. Check integer ranges, encode
+BOOLEAN as 0/1, NUL-terminate and zero-pad visible strings, and require exact-length
+octet strings. Decode reads with the same layout, only for successful entry statuses.
 Strings use fixed slots and batch VISIBLE_STRING writes must contain a NUL.
 Buffers/arrays are caller-owned and never retained. `buffer_size` is the byte
 capacity, at least the sum of bound sizes (6 in the example).

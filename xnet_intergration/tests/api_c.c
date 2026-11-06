@@ -13,12 +13,12 @@ typedef char runtime_values_must_be_stable[
 int xnet_canopen_c_header_test(void) {
     const uint16_t indices[] = {0x2000};
     const uint8_t subindices[] = {0};
-    const uint32_t sizes[] = {2};
+    uint32_t sizes[1], types[1], buffer_size;
     uint32_t batch;
     uint8_t buffer[2] = {0};
     int32_t status;
     uint32_t value_size;
-    return xnet_canopen_bind_batch(NULL, indices, subindices, sizes, 1, &batch) == XNET_CO_INVALID_ARGUMENT
+    return xnet_canopen_bind_batch(NULL, indices, subindices, 1, types, sizes, &buffer_size, &batch) == XNET_CO_INVALID_ARGUMENT
         && xnet_canopen_read_batch(NULL, 0, buffer, sizeof(buffer), &status, 1) == XNET_CO_INVALID_ARGUMENT
         && xnet_canopen_write_batch(NULL, 0, buffer, sizeof(buffer), &status, 1) == XNET_CO_INVALID_ARGUMENT
         && xnet_canopen_read_od(NULL, 0x2000, 0, buffer, sizeof(buffer), &value_size) == XNET_CO_INVALID_ARGUMENT

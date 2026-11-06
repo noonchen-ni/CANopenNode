@@ -13,7 +13,12 @@
 		<Item Name="error handling.vi" Type="VI" URL="../subVI/error handling.vi"/>
 		<Item Name="lib path.vi" Type="VI" URL="../subVI/lib path.vi"/>
 	</Item>
-	<Item Name="typedef" Type="Folder"/>
+	<Item Name="typedef" Type="Folder">
+		<Item Name="canopen types.ctl" Type="VI" URL="../typedef/canopen types.ctl"/>
+		<Item Name="od entry.ctl" Type="VI" URL="../typedef/od entry.ctl"/>
+		<Item Name="od index.ctl" Type="VI" URL="../typedef/od index.ctl"/>
+	</Item>
+	<Item Name="xnet_canopen_bind_batch.vi" Type="VI" URL="../xnet_canopen_bind_batch.vi"/>
 	<Item Name="xnet_canopen_create.vi" Type="VI" URL="../xnet_canopen_create.vi"/>
 	<Item Name="xnet_canopen_destroy.vi" Type="VI" URL="../xnet_canopen_destroy.vi"/>
 	<Item Name="xnet_canopen_initialize.vi" Type="VI" URL="../xnet_canopen_initialize.vi"/>

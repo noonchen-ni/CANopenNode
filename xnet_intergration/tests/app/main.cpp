@@ -1,4 +1,5 @@
 #include "xnet_canopen.h"
+#include "src/can_state.hpp"
 #include "nlohmann/json.hpp"
 
 #include <chrono>
@@ -284,7 +285,7 @@ std::string timestamp() {
 }
 
 void print_status(const xnet_canopen_status_t& s) {
-    static_assert(sizeof(s) == 40, "device app requires the ten-field status ABI");
+    static_assert(sizeof(s) == 48, "device app requires the twelve-field status ABI");
     std::cout << timestamp()
               << " runtime_state=" << runtime_name(s.runtime_state) << '(' << s.runtime_state << ')'
               << " nmt_state=" << nmt_name(s.nmt_state) << '(' << s.nmt_state << ')'
@@ -293,7 +294,9 @@ void print_status(const xnet_canopen_status_t& s) {
               << " can_error_status=0x" << std::hex << std::setfill('0') << std::setw(8) << s.can_error_status << std::dec
               << " node_guarding_timeout=" << s.node_guarding_timeout
               << " reset_node_count=" << s.reset_node_count
-              << " reset_communication_count=" << s.reset_communication_count << std::endl;
+              << " reset_communication_count=" << s.reset_communication_count
+              << " can_state_raw=0x" << std::hex << std::setw(8) << s.can_state_raw << std::dec
+              << " can_state_valid=" << s.can_state_valid << std::endl;
     if (!std::cout) throw std::runtime_error("cannot write status to stdout");
 }
 
@@ -306,6 +309,16 @@ void print_changes(const xnet_canopen_status_t& previous, const xnet_canopen_sta
     if (previous.can_error_status != current.can_error_status)
         std::cerr << "CAN errors changed: 0x" << std::hex << previous.can_error_status << " -> 0x"
                   << current.can_error_status << std::dec << '\n';
+    if (current.can_state_valid && (!previous.can_state_valid || previous.can_state_raw != current.can_state_raw)) {
+        const auto raw = current.can_state_raw;
+        std::cerr << "CAN controller: raw=0x" << std::hex << raw << std::dec
+                  << " comm=" << xco::can_communication_name(raw) << '(' << unsigned(nxCANComm_Get_CommState(raw)) << ')'
+                  << " tx_errors=" << unsigned(nxCANComm_Get_TxErrCount(raw))
+                  << " rx_errors=" << unsigned(nxCANComm_Get_RxErrCount(raw))
+                  << " last_error=" << xco::can_last_error_name(raw) << '(' << unsigned(nxCANComm_Get_LastErr(raw)) << ')'
+                  << " transceiver_error=" << unsigned(nxCANComm_Get_TcvrErr(raw))
+                  << " sleep=" << unsigned(nxCANComm_Get_Sleep(raw)) << '\n';
+    }
     if (previous.node_guarding_timeout != current.node_guarding_timeout)
         std::cerr << "Node guarding timeout changed: " << current.node_guarding_timeout << '\n';
     const uint32_t node_resets = current.reset_node_count - previous.reset_node_count;
@@ -331,7 +344,13 @@ bool run(const Api& api, Device& device, uint32_t duration_seconds) {
             xnet_canopen_status_t status{};
             if (!api.check(api.get_status(device.handle, &status), "xnet_canopen_get_status", device.handle)) return false;
             print_status(status);
-            if (have_previous) print_changes(previous, status);
+            if (!have_previous) {
+                previous = status;
+                previous.can_state_valid = 0;
+            }
+            print_changes(previous, status);
+            if (have_previous && previous.can_error_status != status.can_error_status && status.can_error_status != 0)
+                api.diagnostic(device.handle);
             previous = status;
             have_previous = true;
             if (status.runtime_state != XNET_CO_RUNTIME_RUNNING) {
@@ -370,7 +389,7 @@ int main(int argc, char** argv) {
                   << "\nInterface: " << config.interface_name << "\nModel: " << config.model
                   << "\nPersistence: " << config.persistence << (fs::exists(config.persistence) ? " (exists)" : " (not yet created)")
                   << "\nSaved LSS settings may override model startup settings; this app never deletes persistence."
-                  << "\nUse a library built with the matching 40-byte status ABI."
+                  << "\nUse a library built with the matching 48-byte status ABI."
                   << "\nNative log location is fixed when the library is built; its directory must be writable."
                   << "\nThis is a passive slave: an external master controls NMT; no application/drive model is supplied.\n";
         bool ok = false;

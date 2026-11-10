@@ -6,6 +6,7 @@
  * messages and dispatched through stack-owned software subscriptions.
  */
 #include "internal.hpp"
+#include "can_state.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -238,6 +239,7 @@ void CO_CANmodule_process(CO_CANmodule_t* m) {
         if (tx >= 128) flags |= CO_CAN_ERRTX_PASSIVE;
         if (rx >= 128) flags |= CO_CAN_ERRRX_PASSIVE;
         if (nxCANComm_Get_CommState(state) == nxCANCommState_BusOff) flags |= CO_CAN_ERRTX_BUS_OFF;
+        d.record_can_state(state, flags);
         if (flags != m->CANerrorStatus && flags != 0)
             d.fail(XNET_CO_XNET_ERROR, "CAN communication error flags: " + std::to_string(flags));
         m->CANerrorStatus = flags;
@@ -248,6 +250,42 @@ void CO_CANmodule_process(CO_CANmodule_t* m) {
     }
 }
 } // extern "C"
+
+void xnet_canopen_device::record_can_state(uint32_t raw, uint16_t flags) noexcept {
+    const auto previous = can_state.raw;
+    const bool first = !can_state.valid;
+    const bool significant = first || ((raw ^ previous) & 0xFFFFU) != 0 || flags != can_state.logged_flags;
+    const bool changed = first || raw != previous;
+    can_state.raw = raw;
+    can_state.valid = true;
+    const auto now = xco::Clock::now();
+    if (!significant && now - can_state.last_log < std::chrono::seconds(1)) {
+        if (changed) ++can_state.suppressed_changes;
+        return;
+    }
+    if (!significant && !changed && can_state.suppressed_changes == 0) return;
+
+    const auto unhealthy = [](uint32_t state) {
+        const auto communication = nxCANComm_Get_CommState(state);
+        return (communication != nxCANCommState_ErrorActive && communication != nxCANCommState_Init)
+            || nxCANComm_Get_TxErrCount(state) >= 96 || nxCANComm_Get_RxErrCount(state) >= 96
+            || nxCANComm_Get_TcvrErr(state) != 0;
+    };
+    const bool recovered = !first && unhealthy(previous) && !unhealthy(raw)
+        && nxCANComm_Get_CommState(raw) == nxCANCommState_ErrorActive && !nxCANComm_Get_Sleep(raw);
+    log(unhealthy(raw) ? xco::LogLevel::warning : xco::LogLevel::info,
+        "CAN controller {}: raw=0x{:08x} comm={}({}) tx_errors={} rx_errors={} "
+        "last_error={}({}) transceiver_error={} sleep={} canopen_flags=0x{:04x} counter_changes_suppressed={}",
+        first ? "sample" : recovered ? "recovered" : "changed",
+        raw, xco::can_communication_name(raw), unsigned(nxCANComm_Get_CommState(raw)),
+        unsigned(nxCANComm_Get_TxErrCount(raw)), unsigned(nxCANComm_Get_RxErrCount(raw)),
+        xco::can_last_error_name(raw), unsigned(nxCANComm_Get_LastErr(raw)),
+        unsigned(nxCANComm_Get_TcvrErr(raw)), unsigned(nxCANComm_Get_Sleep(raw)), flags,
+        can_state.suppressed_changes);
+    can_state.logged_flags = flags;
+    can_state.last_log = now;
+    can_state.suppressed_changes = 0;
+}
 
 /**
  * Submit pending snapshots in FIFO order while holding the runtime mutex.

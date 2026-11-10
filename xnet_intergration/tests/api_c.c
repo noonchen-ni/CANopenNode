@@ -1,11 +1,13 @@
 #include "xnet_canopen.h"
 #include <stddef.h>
 
-typedef char status_size_must_be_40[(sizeof(xnet_canopen_status_t) == 40) ? 1 : -1];
+typedef char status_size_must_be_48[(sizeof(xnet_canopen_status_t) == 48) ? 1 : -1];
 typedef char guarding_status_offset_must_be_28[(offsetof(xnet_canopen_status_t, node_guarding_timeout) == 28) ? 1 : -1];
 typedef char node_reset_offset_must_be_32[(offsetof(xnet_canopen_status_t, reset_node_count) == 32) ? 1 : -1];
 typedef char communication_reset_offset_must_be_36[
     (offsetof(xnet_canopen_status_t, reset_communication_count) == 36) ? 1 : -1];
+typedef char can_state_raw_offset_must_be_40[(offsetof(xnet_canopen_status_t, can_state_raw) == 40) ? 1 : -1];
+typedef char can_state_valid_offset_must_be_44[(offsetof(xnet_canopen_status_t, can_state_valid) == 44) ? 1 : -1];
 typedef char runtime_values_must_be_stable[
     (XNET_CO_RUNTIME_UNINITIALIZED == 0 && XNET_CO_RUNTIME_STOPPED == 1
      && XNET_CO_RUNTIME_RUNNING == 2 && XNET_CO_RUNTIME_FAILED == 3) ? 1 : -1];

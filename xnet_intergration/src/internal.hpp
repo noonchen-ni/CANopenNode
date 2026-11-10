@@ -180,6 +180,13 @@ struct xnet_canopen_device {
      */
     uint32_t reset_node_count = 0;
     uint32_t reset_communication_count = 0;
+    struct CANState {
+        uint32_t raw = 0;
+        bool valid = false;
+        uint16_t logged_flags = 0;
+        xco::Clock::time_point last_log{};
+        uint64_t suppressed_changes = 0;
+    } can_state; /**< Runtime-lock-protected controller sample and counter-only log throttling. */
     int32_t error_code = 0; /**< Latest per-handle XNET_CO_* diagnostic code; 0 when cleared. */
     std::array<char, 2048> error_message{}; /**< NUL-terminated diagnostic text, truncated to fit. */
     const uint64_t log_instance = xco::next_log_instance(); /**< Process-local handle identity, stable across LSS/reset. */
@@ -243,6 +250,7 @@ struct xnet_canopen_device {
         }
     }
     void log_failure(const char* message) noexcept;
+    void record_can_state(uint32_t raw, uint16_t flags) noexcept;
     void initialized() const;
     void load_persistent();
     void setup_stack();

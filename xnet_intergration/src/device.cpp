@@ -432,6 +432,7 @@ void xnet_canopen_device::release() {
     if (worker.joinable()) stop();
     std::lock_guard<std::recursive_mutex> lock(mutex);
     adapter.close();
+    can_state = {};
     outgoing.clear();
     if (co || model) log(xco::LogLevel::info, "device uninitialized");
     if (co) { CO_delete(co); co = nullptr; }
@@ -465,6 +466,7 @@ int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interfac
         require(d.state == XNET_CO_RUNTIME_UNINITIALIZED, XNET_CO_INVALID_STATE, "initialize requires an uninitialized handle");
         require(interface_name && *interface_name && model_path && *model_path && persistence_path && *persistence_path,
                 XNET_CO_INVALID_ARGUMENT, "interface, JSON model and persistence paths are required");
+        d.can_state = {};
         try {
             d.interface_name = interface_name;
             d.logger = xco::file_logger();
@@ -704,6 +706,8 @@ int32_t xnet_canopen_get_status(xnet_canopen_handle handle, xnet_canopen_status_
         // or uninitialize. call() holds the same mutex used to complete resets.
         status->reset_node_count = d.reset_node_count;
         status->reset_communication_count = d.reset_communication_count;
+        status->can_state_raw = d.can_state.raw;
+        status->can_state_valid = d.can_state.valid ? 1U : 0U;
         if (d.co) {
             status->nmt_state = CO_NMT_getInternalState(d.co->NMT);
             status->can_error_status = d.co->CANmodule->CANerrorStatus;

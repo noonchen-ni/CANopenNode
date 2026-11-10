@@ -25,8 +25,8 @@ a desktop Linux x86-64 build is not automatically compatible with NI Linux RT.
 The integration
 library's NI-XNET and C++ runtime dependencies must be available to the system
 dynamic loader. Build and deploy the app and library from matching sources:
-there is no ABI-version query, and the app requires the current **40-byte,
-ten-uint32 status structure**, not the former 32-byte structure.
+there is no ABI-version query, and the app requires the current **48-byte,
+twelve-uint32 status structure**, not the former 32- or 40-byte structures.
 
 ## Run
 
@@ -81,12 +81,16 @@ library's existing schema. There is no second CANopen model schema in the app.
 ## Output and lifecycle
 
 The app prints one UTC-timestamped status line to stdout immediately after start
-and then every 500 ms, subject to OS scheduling and native call latency. All ten
+and then every 500 ms, subject to OS scheduling and native call latency. All twelve
 fields are included: runtime state, NMT state, active/pending node IDs,
 active/pending bitrates, hexadecimal CAN errors, guarding timeout and both reset
-counters. Runtime/NMT states include symbolic names and numeric values.
+counters, plus the raw NI-XNET CAN controller state and its validity indicator.
+Runtime/NMT states include symbolic names and numeric values.
 Startup details, sampled state changes, reset-counter deltas and errors go to
-stderr. Redirect stdout to save the status stream.
+stderr. Valid controller samples are decoded on the first observation and on
+sampled raw-state changes: communication state, TX/RX counters, last bus error,
+transceiver error and sleep indication. A nonzero CAN-error flag transition also
+prints the retained native diagnostic. Redirect stdout to save the status stream.
 
 The startup summary shows resolved paths; the first status snapshot shows the
 effective node ID and bitrate, including persisted settings. Latest native

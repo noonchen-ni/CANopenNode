@@ -15,7 +15,7 @@ endif()
 set(previous_ms "")
 foreach(snapshot IN LISTS snapshots)
     foreach(field runtime_state nmt_state active_node_id pending_node_id active_bitrate_kbps pending_bitrate_kbps
-                  can_error_status node_guarding_timeout reset_node_count reset_communication_count)
+                  can_error_status node_guarding_timeout reset_node_count reset_communication_count can_state_raw can_state_valid)
         if(NOT snapshot MATCHES " ${field}=")
             message(FATAL_ERROR "Status missing ${field}:\n${snapshot}")
         endif()
@@ -36,6 +36,8 @@ foreach(snapshot IN LISTS snapshots)
 endforeach()
 if(NOT output MATCHES "runtime_state=RUNNING\\(2\\).*nmt_state=PRE_OPERATIONAL\\(127\\).*active_node_id=10"
    OR NOT output MATCHES "active_bitrate_kbps=125"
+   OR NOT output MATCHES "can_state_raw=0x00000000 can_state_valid=1"
+   OR NOT errors MATCHES "CAN controller: raw=0x0 comm=error-active\\(0\\)"
    OR NOT errors MATCHES "Device destroyed; cleanup complete")
     message(FATAL_ERROR "Unexpected status or cleanup:\n${output}\n${errors}")
 endif()

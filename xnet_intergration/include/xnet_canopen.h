@@ -74,10 +74,10 @@ enum {
 };
 
 /**
- * Synchronized 40-byte status snapshot, represented by ten consecutive uint32s.
- * The first eight fields retain their previous offsets; the two reset counters
- * are appended at byte offsets 32 and 36. This extends the former 32-byte ABI:
- * rebuild C callers and enlarge LabVIEW output descriptors before calling.
+ * Synchronized 48-byte status snapshot, represented by twelve consecutive uint32s.
+ * The first ten fields retain their previous offsets; can_state_raw and
+ * can_state_valid are appended at byte offsets 40 and 44. This extends the former
+ * 40-byte ABI: rebuild C callers and enlarge LabVIEW output descriptors before calling.
  * get_status has no output-size argument and cannot detect an old/small buffer.
  *
  * Reset counters belong to the handle, not to the resettable Object Dictionary.
@@ -99,6 +99,20 @@ enum {
  * A new guarding request, disabled monitoring, enabled heartbeat, or stack
  * restart/reset clears it. The external model decides the drive-level reaction;
  * the communication stack independently applies its NMT/error-reporting policy.
+ *
+ * can_state_raw caches the last NI-XNET CAN communication state for which both
+ * nxReadState and its fault output were successful. can_state_valid is 1 once
+ * such a sample exists; raw zero is a valid healthy sample, not "unavailable".
+ * The cache survives stop, protocol reset and runtime failure for diagnosis.
+ * It is historical while stopped/failed or during LSS silence, not a live health
+ * guarantee even when valid. Initialize attempts and successful uninitialize
+ * clear it. get_status and clear_error neither poll hardware nor clear the cache.
+ *
+ * Decode raw bits: 0..3 communication (0 active, 1 passive, 2 bus-off, 3 init),
+ * bit 4 transceiver error, bit 5 sleep, bits 8..11 last bus error (0 none,
+ * 1 stuff, 2 form, 3 ACK, 4 bit-1, 5 bit-0, 6 CRC), bits 16..23 TX error
+ * count, bits 24..31 RX error count. Preserve unknown codes; the last bus
+ * error is historical, not necessarily an active fault or an NI-XNET status code.
  */
 typedef struct {
     uint32_t runtime_state;        /**< One of XNET_CO_RUNTIME_*, not an API result. */
@@ -111,6 +125,8 @@ typedef struct {
     uint32_t node_guarding_timeout; /**< 1 while life guarding has timed out; otherwise 0. */
     uint32_t reset_node_count;     /**< Completed Reset Node operations; application OD defaults were restored. */
     uint32_t reset_communication_count; /**< Completed Reset Communication operations; application OD values were retained. */
+    uint32_t can_state_raw;        /**< Last successful NI-XNET CAN state; decode only when can_state_valid is 1. */
+    uint32_t can_state_valid;      /**< 1 if a successful controller sample is cached, otherwise 0. */
 } xnet_canopen_status_t;
 
 /**

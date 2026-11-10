@@ -1,13 +1,16 @@
 #include "fake_xnet.hpp"
+#include "can_state.hpp"
 #include "logging_config.h"
 #include "spdlog/logger.h"
 #include "spdlog/sinks/base_sink.h"
+#include "spdlog/sinks/ostream_sink.h"
 
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 
 #define CHECK(condition) do { if (!(condition)) throw std::runtime_error( \
     std::string(__FILE__) + ":" + std::to_string(__LINE__) + ": " #condition); } while (false)
@@ -1043,6 +1046,60 @@ void errors_and_cleanup() {
     CHECK(xnet_canopen_uninitialize(f.device) == 0 && fake::sessions() == 0);
 }
 
+void can_state_status() {
+    Fixture f;
+    CHECK(f.status().can_state_valid == 0 && f.status().can_state_raw == 0);
+    CHECK(f.initialize() == 0);
+    CHECK(f.status().can_state_valid == 0);
+    f.start();
+    wait_for([&] { return f.status().can_state_valid == 1; });
+    CHECK(f.status().can_state_raw == 0);
+    const uint32_t passive = (128U << 24) | (97U << 16) | (nxCANLastErr_CRC << 8)
+        | nxCANCommState_ErrorPassive | 0x30U;
+    fake::bus_state(passive);
+    wait_for([&] { return f.status().can_state_raw == passive; });
+    auto status = f.status();
+    CHECK(status.can_state_valid == 1 && status.runtime_state == XNET_CO_RUNTIME_RUNNING);
+    CHECK(status.can_error_status == (CO_CAN_ERRTX_WARNING | CO_CAN_ERRRX_WARNING | CO_CAN_ERRRX_PASSIVE));
+    fake::bus_state(0);
+    wait_for([&] { return f.status().can_state_raw == 0 && f.status().can_error_status == 0; });
+    CHECK(diagnostic(f.device).find("CAN communication error flags") != std::string::npos);
+    exchange(0, {0x82, 10}, 0x70a, 0);
+    CHECK(f.status().can_state_valid == 1);
+    fake::bus_state(passive);
+    wait_for([&] { return f.status().can_state_raw == passive; });
+    CHECK(xnet_canopen_stop(f.device) == 0);
+    CHECK(f.status().can_state_valid == 1 && f.status().can_state_raw == passive);
+    CHECK(xnet_canopen_clear_error(f.device) == 0);
+    CHECK(f.status().can_state_raw == passive);
+
+    // Status reads must use the cache, not consume another NI-XNET state query.
+    fake::fail_next("state", nxErrInternalError);
+    CHECK(f.status().can_state_raw == passive);
+    {
+        std::lock_guard<std::recursive_mutex> lock(f.device->mutex);
+        CO_CANmodule_process(f.device->co->CANmodule);
+    }
+    CHECK(f.status().runtime_state == XNET_CO_RUNTIME_FAILED);
+    CHECK(f.status().can_state_valid == 1 && f.status().can_state_raw == passive);
+    CHECK(diagnostic(f.device).find("read CAN state (-1074384895)") != std::string::npos);
+    CHECK(xnet_canopen_uninitialize(f.device) == 0);
+    CHECK(f.status().can_state_valid == 0 && f.status().can_state_raw == 0);
+
+    fake::fail_next("create_input", nxErrInternalError);
+    CHECK(f.initialize() == XNET_CO_XNET_ERROR);
+    CHECK(f.status().can_state_valid == 0);
+    CHECK(f.initialize() == 0);
+    fake::bus_state(passive, nxErrMissingBusPower);
+    {
+        std::lock_guard<std::recursive_mutex> lock(f.device->mutex);
+        CO_CANmodule_process(f.device->co->CANmodule);
+    }
+    CHECK(f.status().runtime_state == XNET_CO_RUNTIME_FAILED);
+    CHECK(f.status().can_state_valid == 0 && f.status().can_state_raw == 0);
+    CHECK(diagnostic(f.device).find("CAN state fault (-1074384856)") != std::string::npos);
+}
+
 void caller_managed_resources() {
     Fixture f;
     f.saved_path = std::filesystem::path(".") / std::filesystem::relative(f.saved_path);
@@ -1313,6 +1370,64 @@ struct RestoreLogSinks {
     ~RestoreLogSinks() { logger->sinks() = std::move(original); }
 };
 
+void can_state_logging() {
+    Fixture f; CHECK(f.initialize() == 0);
+    std::ostringstream messages;
+    RestoreLogSinks restore(f.device->logger);
+    f.device->logger->sinks() = {std::make_shared<spdlog::sinks::ostream_sink_mt>(messages)};
+    auto sample = [&](uint32_t raw) {
+        fake::bus_state(raw);
+        std::lock_guard<std::recursive_mutex> lock(f.device->mutex);
+        CO_CANmodule_process(f.device->co->CANmodule);
+        CHECK(f.device->can_state.valid && f.device->can_state.raw == raw);
+    };
+    auto records = [&] {
+        const auto text = messages.str();
+        size_t count = 0, offset = 0;
+        while ((offset = text.find("CAN controller ", offset)) != std::string::npos) { ++count; ++offset; }
+        return count;
+    };
+    sample(0);
+    CHECK(records() == 1);
+    CHECK(messages.str().find("CAN controller sample: raw=0x00000000 comm=error-active(0)") != std::string::npos);
+    sample(0);
+    CHECK(records() == 1);
+    // Make the throttle interval deterministic without sleeping or running a worker.
+    f.device->can_state.last_log = xco::Clock::now();
+    sample(1U << 24);
+    sample(2U << 24);
+    CHECK(records() == 1 && f.status().can_state_raw == (2U << 24));
+    f.device->can_state.last_log -= 1s;
+    sample(2U << 24);
+    CHECK(records() == 2);
+    CHECK(messages.str().find("rx_errors=2") != std::string::npos);
+    CHECK(messages.str().find("counter_changes_suppressed=2") != std::string::npos);
+    sample((128U << 24) | (97U << 16) | (nxCANLastErr_CRC << 8) | nxCANCommState_ErrorPassive | 0x30U);
+    CHECK(records() == 3);
+    CHECK(messages.str().find("comm=error-passive(1) tx_errors=97 rx_errors=128 last_error=CRC(6) "
+        "transceiver_error=1 sleep=1 canopen_flags=0x0301") != std::string::npos);
+    sample(0);
+    CHECK(records() == 4 && f.status().can_error_status == 0);
+    CHECK(messages.str().find("CAN controller recovered: raw=0x00000000") != std::string::npos);
+    CHECK(diagnostic(f.device).find("CAN communication error flags") != std::string::npos);
+    sample(nxCANCommState_BusOff);
+    CHECK(records() == 5 && (f.status().can_error_status & CO_CAN_ERRTX_BUS_OFF) != 0);
+    sample(0);
+    CHECK(records() == 6);
+    for (uint32_t code = 0; code <= 7; ++code) sample(code << 8);
+    CHECK(messages.str().find("last_error=stuff(1)") != std::string::npos);
+    CHECK(messages.str().find("last_error=form(2)") != std::string::npos);
+    CHECK(messages.str().find("last_error=ACK(3)") != std::string::npos);
+    CHECK(messages.str().find("last_error=bit-1(4)") != std::string::npos);
+    CHECK(messages.str().find("last_error=bit-0(5)") != std::string::npos);
+    CHECK(messages.str().find("last_error=unknown(7)") != std::string::npos);
+    sample(nxCANCommState_Init);
+    sample(0xFU);
+    CHECK(messages.str().find("comm=initializing(3)") != std::string::npos);
+    CHECK(messages.str().find("comm=unknown(15)") != std::string::npos);
+    CHECK(std::string(xco::can_communication_name(0)) == "error-active");
+}
+
 void file_logging() {
     Fixture f; CHECK(f.initialize() == 0); f.start(); operational(f);
     const auto instance = f.device->log_instance;
@@ -1423,7 +1538,8 @@ int main(int argc, char** argv) {
         {"reset status lifecycle", reset_status_lifecycle}, {"failed reset status", failed_reset_status},
         {"reset status wraparound", reset_status_wraparound},
         {"reset status before boot-up transmission", reset_status_before_bootup_transmission},
-        {"errors and cleanup", errors_and_cleanup}, {"caller-managed resources", caller_managed_resources},
+        {"errors and cleanup", errors_and_cleanup}, {"CAN state status", can_state_status},
+        {"CAN state logging", can_state_logging}, {"caller-managed resources", caller_managed_resources},
         {"queues and filtering", queues_and_filtering}, {"concurrent channels", concurrent_channels},
         {"synchronous TPDO requests", synchronous_requests}, {"node guarding", node_guarding},
         {"heartbeat and guarding switching", supervision_switching}, {"configurable SYNC and EMCY", configurable_services},

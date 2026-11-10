@@ -173,7 +173,7 @@ C++, and executable linker flags.
 
 The build also produces `xnet_canopen_device` by default
 (`XNET_CANOPEN_BUILD_APP=OFF` disables it). It accepts `--lib` and `--config`,
-prints all ten status fields every 500 ms, and cleans up on SIGINT/SIGTERM.
+prints all twelve status fields every 500 ms, and cleans up on SIGINT/SIGTERM.
 Optional `--duration <seconds>` supports bounded smoke tests. The runner config
 specifies the XNET interface, existing model JSON path and persistence path.
 See [tests/app/README.md](tests/app/README.md) for standalone builds, examples,
@@ -589,7 +589,7 @@ CANopen codes named by `XNET_CO_TYPE_*` in the public enum; their array storage 
 always uint32, not compiler-dependent enum storage. In LabVIEW configure these as numeric arrays
 passed by **Array Data Pointer**, not array handles or arrays of clusters.
 Validate array lengths before calling: C receives pointers, not array dimensions.
-The `get_status()` descriptor has ten uint32 fields (40 bytes); it is separate
+The `get_status()` descriptor has twelve uint32 fields (48 bytes); it is separate
 from the per-entry int32 status array returned by batch operations.
 
 `bind_batch()` derives exact lengths and types from the initialized model, validates
@@ -690,12 +690,46 @@ entries. All fields are copied under the same runtime lock.
 | 28 | `node_guarding_timeout` | Current life-guard timeout condition, 0 or 1. |
 | 32 | `reset_node_count` | Successfully completed Reset Node operations. |
 | 36 | `reset_communication_count` | Successfully completed Reset Communication operations. |
+| 40 | `can_state_raw` | Last successful NI-XNET CAN controller sample. |
+| 44 | `can_state_valid` | 1 when a successful controller sample is cached, otherwise 0. |
 
-**ABI change:** the structure is now 40 bytes, previously 32. The original eight
-fields retain their offsets; `node_guarding_timeout` remains at offset 28.
+**ABI change:** the structure is now 48 bytes, previously 40 (originally 32).
+The original ten fields retain their offsets; `node_guarding_timeout` remains at offset 28.
 Rebuild C callers and enlarge LabVIEW Call Library Function Node output
-descriptors to ten uint32 fields before using the updated library. The function
-has no output-size parameter and cannot safely accept an old 32-byte buffer.
+descriptors to twelve uint32 fields before using the updated library. The function
+has no output-size parameter and cannot safely accept an old 32- or 40-byte buffer.
+The binary LabVIEW VIs under `lv_wrapper/` are not automatically regenerated:
+resize the status output array/cluster and its Call Library Function Node buffer
+to 48 bytes before deployment. Do not mix the updated library with an older wrapper.
+
+### Raw CAN controller state
+
+The worker caches `can_state_raw` only when both `nxReadState` and its `fault`
+output succeed. `get_status()` copies the cache without another hardware call.
+Check `can_state_valid` first: raw zero is a valid error-active, zero-counter
+sample, not an unavailable marker. Before the first sample, both fields are zero.
+Stop, protocol resets, and runtime failure retain the last successful sample;
+it can be historical, including during LSS silence. Validity does not guarantee
+current health. Successful uninitialize and initialize attempts clear the cache.
+`clear_error()` does not change it.
+
+LabVIEW can decode using logical shifts and masks; VeriStand can expose these
+as numeric diagnostic channels without string processing in the model loop:
+
+| Expression on `can_state_raw` | Meaning |
+| --- | --- |
+| `raw & 0xF` | Communication: 0 error-active, 1 error-passive, 2 bus-off, 3 initializing. |
+| `(raw >> 4) & 1` | Transceiver error indication. |
+| `(raw >> 5) & 1` | Sleep indication. |
+| `(raw >> 8) & 0xF` | Last bus error: 0 none, 1 stuff, 2 form, 3 ACK, 4 bit-1, 5 bit-0, 6 CRC. |
+| `(raw >> 16) & 0xFF` | TX error counter. |
+| `(raw >> 24) & 0xFF` | RX error counter. |
+
+Preserve unknown numeric values. The last bus error is historical, not necessarily
+an active fault, and is distinct from an NI-XNET return status or `fault` code.
+CANopen flag mapping and runtime/NMT error policies are unchanged.
+
+### Reset notification
 
 Reset counters are stored outside the OD and stack. Each increments only after
 the reset restores the required OD values, rebuilds services, and successfully
@@ -757,6 +791,15 @@ unread input and records the loss. Unsupported incoming frame types/IDs/payloads
 are ignored with a diagnostic. Check runtime state as well as the latest error.
 
 ## File logging
+
+Controller samples include raw state, decoded communication state, TX/RX error
+counters, last bus error, transceiver/sleep indications and CANopen flags.
+The first sample and changes to non-counter state or CANopen flags are logged
+immediately, including recovery. Counter-only changes are summarized at most
+once per second, including the number of suppressed changes; identical samples
+do not produce repeated records. Recovery does not clear retained diagnostics.
+These logs are produced by the library itself with LabVIEW/VeriStand callers too;
+the console is not required. The test app also prints sampled decoded state changes.
 
 Set **`XNET_CANOPEN_LOG_PATH`** in
 [src/logging_config.h](src/logging_config.h) to the desired absolute file path
@@ -1213,7 +1256,7 @@ synchronous manual requests. Additional groups cover guarding RTR filtering and
 toggle replies, life-time timeout/recovery, heartbeat/guarding switching,
 configurable SYNC/EMCY, collision/overflow rejection, SYNC timers/counters, and
 communication-setting retention/reset. A C source verifies the public header,
-40-byte status layout, unchanged guarding-status offset, and appended reset
+48-byte status layout, unchanged guarding-status offset, and appended reset
 counter offsets. Reset-status groups cover completion counts, preserved/reset
 application values, repeated/broadcast commands, ordinary NMT state changes,
 stop/start, teardown/reinitialization, failed resets/initialization and uint32

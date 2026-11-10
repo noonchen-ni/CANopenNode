@@ -14,15 +14,25 @@
 		<Item Name="lib path.vi" Type="VI" URL="../subVI/lib path.vi"/>
 	</Item>
 	<Item Name="typedef" Type="Folder">
+		<Item Name="canopen status.ctl" Type="VI" URL="../typedef/canopen status.ctl"/>
 		<Item Name="canopen types.ctl" Type="VI" URL="../typedef/canopen types.ctl"/>
 		<Item Name="od entry.ctl" Type="VI" URL="../typedef/od entry.ctl"/>
 		<Item Name="od index.ctl" Type="VI" URL="../typedef/od index.ctl"/>
 	</Item>
 	<Item Name="xnet_canopen_bind_batch.vi" Type="VI" URL="../xnet_canopen_bind_batch.vi"/>
+	<Item Name="xnet_canopen_clear_error.vi" Type="VI" URL="../xnet_canopen_clear_error.vi"/>
 	<Item Name="xnet_canopen_create.vi" Type="VI" URL="../xnet_canopen_create.vi"/>
 	<Item Name="xnet_canopen_destroy.vi" Type="VI" URL="../xnet_canopen_destroy.vi"/>
+	<Item Name="xnet_canopen_get_last_error.vi" Type="VI" URL="../xnet_canopen_get_last_error.vi"/>
+	<Item Name="xnet_canopen_get_status.vi" Type="VI" URL="../xnet_canopen_get_status.vi"/>
 	<Item Name="xnet_canopen_initialize.vi" Type="VI" URL="../xnet_canopen_initialize.vi"/>
+	<Item Name="xnet_canopen_read_batch.vi" Type="VI" URL="../xnet_canopen_read_batch.vi"/>
+	<Item Name="xnet_canopen_read_od.vi" Type="VI" URL="../xnet_canopen_read_od.vi"/>
+	<Item Name="xnet_canopen_request_tpdo.vi" Type="VI" URL="../xnet_canopen_request_tpdo.vi"/>
+	<Item Name="xnet_canopen_set_fault.vi" Type="VI" URL="../xnet_canopen_set_fault.vi"/>
 	<Item Name="xnet_canopen_start.vi" Type="VI" URL="../xnet_canopen_start.vi"/>
 	<Item Name="xnet_canopen_stop.vi" Type="VI" URL="../xnet_canopen_stop.vi"/>
 	<Item Name="xnet_canopen_uninitialize.vi" Type="VI" URL="../xnet_canopen_uninitialize.vi"/>
+	<Item Name="xnet_canopen_write_batch.vi" Type="VI" URL="../xnet_canopen_write_batch.vi"/>
+	<Item Name="xnet_canopen_write_od.vi" Type="VI" URL="../xnet_canopen_write_od.vi"/>
 </Library>

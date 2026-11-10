@@ -59,7 +59,18 @@ nxStatus_t _NXFUNC nxSetProperty(nxSessionRef_t ref, u32 property, u32 size, voi
     std::lock_guard<std::mutex> lock(mutex);
     if (auto status = result("property")) return status;
     if (!refs.count(ref)) return nxErrParameterNullOrEmpty;
-    if (property == nxPropSession_IntfBaudRate64) {
+    if (property == nxPropSession_AutoStart) {
+        if (!value) return nxErrParameterNullOrEmpty;
+        if (size != sizeof(u8)) return nxErrInvalidPropertySize;
+        const auto enabled = *static_cast<u8*>(value);
+        if (refs.at(ref).mode == nxMode_FrameInStream && !enabled) return nxErrInputSessionMustAutoStart;
+        event(refs.at(ref).mode == nxMode_FrameInStream ? "input_auto_start" : "output_auto_start", enabled);
+    } else if (property == nxPropSession_QueueSize) {
+        if (!value) return nxErrParameterNullOrEmpty;
+        if (size != sizeof(u32)) return nxErrInvalidPropertySize;
+        const auto bytes = *static_cast<u32*>(value);
+        event(refs.at(ref).mode == nxMode_FrameInStream ? "input_queue_size" : "output_queue_size", bytes);
+    } else if (property == nxPropSession_IntfBaudRate64) {
         if (size != sizeof(u64)) return nxErrParameterNullOrEmpty;
         refs.at(ref).bitrate = *static_cast<u64*>(value); event("bitrate", refs.at(ref).bitrate);
     }

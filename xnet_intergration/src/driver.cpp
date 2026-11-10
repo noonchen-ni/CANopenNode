@@ -22,7 +22,8 @@ void Adapter::check(nxStatus_t status, const char* operation) {
 
 /**
  * Open raw frame streams on the same physical interface, without a CAN database.
- * Keep auto-start off so initialize can provision resources without bus traffic.
+ * Leave input auto-start enabled as required by XNET; no reads occur until start.
+ * Disable output auto-start so initialization does not start bus communication.
  * Partial session acquisition is retained in this object for release() to clean
  * up or retry; this method does not hide an error by discarding a live reference.
  */
@@ -31,14 +32,15 @@ void Adapter::open(const std::string& name, uint16_t kbps) {
     check(nxCreateSession(":memory:", "", "", name.c_str(), nxMode_FrameOutStream, &output), "create output");
     // XNET boolean properties use a one-byte u8, not the stack's uint_fast8_t.
     u8 off = 0;
-    check(nxSetProperty(input, nxPropSession_AutoStart, sizeof(off), &off), "disable input auto-start");
     check(nxSetProperty(output, nxPropSession_AutoStart, sizeof(off), &off), "disable output auto-start");
     check(nxSetProperty(input, nxPropSession_IntfEchoTx, sizeof(off), &off), "disable transmit echo");
     u32 timing = nxOutStrmTimng_Immediate;
     check(nxSetProperty(output, nxPropSession_IntfOutStrmTimng, sizeof(timing), &timing), "immediate output timing");
-    u32 queue_size = 1024;
-    check(nxSetProperty(input, nxPropSession_QueueSize, sizeof(queue_size), &queue_size), "input queue size");
-    check(nxSetProperty(output, nxPropSession_QueueSize, sizeof(queue_size), &queue_size), "output queue size");
+    // Use NI-XNET's default queue sizes. Uncomment to override with 1024 classic CAN frames.
+    // Frame-stream queue sizes are bytes, including each frame's header and padding.
+    // u32 queue_size = 1024 * sizeof(nxFrameCAN_t);
+    // check(nxSetProperty(input, nxPropSession_QueueSize, sizeof(queue_size), &queue_size), "input queue size");
+    // check(nxSetProperty(output, nxPropSession_QueueSize, sizeof(queue_size), &queue_size), "output queue size");
     bitrate(kbps);
 }
 

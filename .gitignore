@@ -15,4 +15,5 @@ doc/html/
 *.kdev4
 
 build
+/xnet_intergration/build-tests/
 __pycache__

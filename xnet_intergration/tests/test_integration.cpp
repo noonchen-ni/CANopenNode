@@ -291,6 +291,35 @@ void model_validation() {
     bad = j; bad["emcy"] = {{"inhibit_100us", 65536}}; CHECK(rejects(bad));
 }
 
+void adapter_session_configuration() {
+    Fixture f;
+    CHECK(f.initialize() == XNET_CO_OK);
+    CHECK(f.status().runtime_state == XNET_CO_RUNTIME_STOPPED);
+    CHECK(fake::sessions() == 2 && fake::transmitted().empty());
+    unsigned output_auto_start = 0;
+    for (const auto& event : fake::events()) {
+        CHECK(event.operation != "input_auto_start" && event.operation != "start" && event.operation != "write");
+        CHECK(event.operation != "input_queue_size" && event.operation != "output_queue_size");
+        if (event.operation == "output_auto_start") {
+            CHECK(event.value == 0);
+            ++output_auto_start;
+        }
+    }
+    CHECK(output_auto_start == 1);
+    u8 off = 0;
+    CHECK(nxSetProperty(f.device->adapter.input, nxPropSession_AutoStart, sizeof(off), &off)
+          == nxErrInputSessionMustAutoStart);
+    u32 wrong_bool_size = 0;
+    CHECK(nxSetProperty(f.device->adapter.input, nxPropSession_AutoStart, sizeof(wrong_bool_size), &wrong_bool_size)
+          == nxErrInvalidPropertySize);
+    CHECK(nxSetProperty(f.device->adapter.input, nxPropSession_QueueSize, sizeof(off), &off)
+          == nxErrInvalidPropertySize);
+    f.start();
+    CHECK(f.status().runtime_state == XNET_CO_RUNTIME_RUNNING);
+    CHECK(xnet_canopen_stop(f.device) == XNET_CO_OK);
+    CHECK(f.status().runtime_state == XNET_CO_RUNTIME_STOPPED);
+}
+
 void startup_bitrates() {
     Fixture f;
     auto j = xco::read_json(f.model_path);
@@ -1380,6 +1409,7 @@ int main(int argc, char** argv) {
     if (!xnet_canopen_c_header_test()) return 1;
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"model validation", model_validation}, {"NODE_ID offsets", node_id_offsets},
+        {"adapter session configuration", adapter_session_configuration},
         {"startup bitrates", startup_bitrates}, {"scalar limits", scalar_limits},
         {"batches and lifecycle", batches_and_lifecycle}, {"partial writes and strings", partial_and_strings},
         {"single OD access", single_od_access},

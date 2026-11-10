@@ -200,6 +200,12 @@ when already running; repeated `stop()` calls retain the stopped state but still
 attempt session stop/flush and can report cleanup errors. A FAILED runtime cannot
 be restarted without uninitialization/reinitialization.
 
+NI-XNET input auto-start remains enabled as required by the driver; initialization
+does not read from the input session. Output auto-start is disabled, and `start()`
+explicitly starts both sessions before worker I/O. Both frame-stream queues use
+NI-XNET's default sizes. An optional override is retained as commented-out code
+in `src/driver.cpp`; its size is in bytes, including frame headers and padding.
+
 `start()` after `stop()` rebuilds protocol state. A configured node emits boot-up
 and waits in NMT Pre-operational for the master; node ID 255 remains
 LSS-unconfigured instead. Application values, communication settings and batch

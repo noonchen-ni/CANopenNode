@@ -70,6 +70,11 @@ nxStatus_t _NXFUNC nxSetProperty(nxSessionRef_t ref, u32 property, u32 size, voi
         if (size != sizeof(u32)) return nxErrInvalidPropertySize;
         const auto bytes = *static_cast<u32*>(value);
         event(refs.at(ref).mode == nxMode_FrameInStream ? "input_queue_size" : "output_queue_size", bytes);
+    } else if (property == nxPropSession_IntfCANTerm) {
+        if (!value) return nxErrParameterNullOrEmpty;
+        if (size != sizeof(u32)) return nxErrInvalidPropertySize;
+        if (auto status = result("termination")) return status;
+        event("termination", *static_cast<u32*>(value));
     } else if (property == nxPropSession_IntfBaudRate64) {
         if (size != sizeof(u64)) return nxErrParameterNullOrEmpty;
         refs.at(ref).bitrate = *static_cast<u64*>(value); event("bitrate", refs.at(ref).bitrate);

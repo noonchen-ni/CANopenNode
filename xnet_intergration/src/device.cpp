@@ -478,7 +478,9 @@ int32_t xnet_canopen_initialize(xnet_canopen_handle handle, const char* interfac
             d.load_persistent();
             d.active_bitrate = d.pending_bitrate;
             d.model->restore(true, d.pending_node);
-            d.adapter.open(d.interface_name, d.active_bitrate);
+            d.adapter.open(d.interface_name, d.active_bitrate, d.model->can_termination);
+            if (d.model->can_termination.has_value())
+                d.log(xco::LogLevel::info, "CAN termination configured: {}", *d.model->can_termination ? "on" : "off");
             d.setup_stack();
             // Commit a new counting lifetime only after initialization succeeds;
             // failed attempts must preserve the previous lifetime's counts.

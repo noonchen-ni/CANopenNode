@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -107,6 +108,7 @@ struct Model {
     std::array<uint32_t, 4> identity{}; /**< Vendor ID, product code, revision number, serial number (LSS/0x1018). */
     uint8_t startup_node = 10; /**< JSON startup node ID: 1..127, or 255 for LSS-unconfigured. */
     uint16_t startup_bitrate = 125; /**< JSON startup bitrate in kbit/s, before persistence overrides. */
+    std::optional<bool> can_termination;
     uint16_t rpdo_count = 0, tpdo_count = 0; /**< Configured receive/transmit PDO counts, respectively. */
     uint32_t worker_period_us = 1000; /**< Worker wait interval in microseconds; not a hard real-time guarantee. */
     bool emcy_reconfigured = false; /**< An SDO-selected EMCY ID must survive stop/start without startup rebasing. */
@@ -149,7 +151,7 @@ struct Batch {
 struct Adapter {
     nxSessionRef_t input = 0, output = 0; /**< Input/output stream references, respectively; 0 means none owned. */
     bool sessions_started = false; /**< Both starts completed; cleared by stop/close, not a live hardware-state query. */
-    void open(const std::string& name, uint16_t bitrate);
+    void open(const std::string& name, uint16_t bitrate, std::optional<bool> termination);
     void bitrate(uint16_t kbps);
     void start();
     void stop_flush();

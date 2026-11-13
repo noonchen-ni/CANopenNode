@@ -28,7 +28,7 @@ void Adapter::check(nxStatus_t status, const char* operation) {
  * Partial session acquisition is retained in this object for release() to clean
  * up or retry; this method does not hide an error by discarding a live reference.
  */
-void Adapter::open(const std::string& name, uint16_t kbps) {
+void Adapter::open(const std::string& name, uint16_t kbps, std::optional<bool> termination) {
     check(nxCreateSession(":memory:", "", "", name.c_str(), nxMode_FrameInStream, &input), "create input");
     check(nxCreateSession(":memory:", "", "", name.c_str(), nxMode_FrameOutStream, &output), "create output");
     // XNET boolean properties use a one-byte u8, not the stack's uint_fast8_t.
@@ -37,6 +37,10 @@ void Adapter::open(const std::string& name, uint16_t kbps) {
     check(nxSetProperty(input, nxPropSession_IntfEchoTx, sizeof(off), &off), "disable transmit echo");
     u32 timing = nxOutStrmTimng_Immediate;
     check(nxSetProperty(output, nxPropSession_IntfOutStrmTimng, sizeof(timing), &timing), "immediate output timing");
+    if (termination.has_value()) {
+        u32 value = *termination ? nxCANTerm_On : nxCANTerm_Off;
+        check(nxSetProperty(input, nxPropSession_IntfCANTerm, sizeof(value), &value), "set CAN termination");
+    }
     // Use NI-XNET's default queue sizes. Uncomment to override with 1024 classic CAN frames.
     // Frame-stream queue sizes are bytes, including each frame's header and padding.
     // u32 queue_size = 1024 * sizeof(nxFrameCAN_t);

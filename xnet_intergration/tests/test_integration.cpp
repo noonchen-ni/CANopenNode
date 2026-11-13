@@ -275,6 +275,14 @@ void model_validation() {
         bad = j; bad["bitrate_kbps"] = rate; CHECK(rejects(bad));
     }
     bad = j; bad["unexpected"] = true; CHECK(rejects(bad));
+    for (const auto& value : {xco::Json(1), xco::Json("true"), xco::Json(nullptr)}) {
+        bad = j; bad["can_termination"] = value; CHECK(rejects(bad));
+    }
+    CHECK(OD_find(&m.od, 0x1008) == nullptr);
+    for (const auto& name : {xco::Json(42), xco::Json(std::string(4096, 'x')),
+                             xco::Json(std::string("a\0b", 3)), xco::Json("a\nb")}) {
+        bad = j; bad["device_name"] = name; CHECK(rejects(bad));
+    }
     auto maximum_life_time = j;
     maximum_life_time["node_guarding"] = {{"guard_time_ms", 65535}, {"life_time_factor", 65}};
     xco::Model maximum_life_time_model; maximum_life_time_model.load(maximum_life_time);
@@ -303,6 +311,7 @@ void adapter_session_configuration() {
     for (const auto& event : fake::events()) {
         CHECK(event.operation != "input_auto_start" && event.operation != "start" && event.operation != "write");
         CHECK(event.operation != "input_queue_size" && event.operation != "output_queue_size");
+        CHECK(event.operation != "termination");
         if (event.operation == "output_auto_start") {
             CHECK(event.value == 0);
             ++output_auto_start;
@@ -321,6 +330,39 @@ void adapter_session_configuration() {
     CHECK(f.status().runtime_state == XNET_CO_RUNTIME_RUNNING);
     CHECK(xnet_canopen_stop(f.device) == XNET_CO_OK);
     CHECK(f.status().runtime_state == XNET_CO_RUNTIME_STOPPED);
+}
+
+void can_termination_configuration() {
+    for (const bool enabled : {false, true}) {
+        Fixture f;
+        auto j = xco::read_json(f.model_path);
+        j["can_termination"] = enabled; f.model(j);
+        CHECK(f.initialize() == XNET_CO_OK);
+        unsigned applied = 0;
+        for (const auto& event : fake::events()) {
+            CHECK(event.operation != "start");
+            if (event.operation == "termination") {
+                CHECK(event.value == (enabled ? nxCANTerm_On : nxCANTerm_Off));
+                ++applied;
+            }
+        }
+        CHECK(applied == 1);
+        f.start();
+        CHECK(xnet_canopen_stop(f.device) == XNET_CO_OK);
+        f.start();
+        exchange(0, {0x82, 10}, 0x70a, 0);
+        applied = 0;
+        for (const auto& event : fake::events())
+            if (event.operation == "termination") ++applied;
+        CHECK(applied == 1);
+    }
+    Fixture f;
+    auto j = xco::read_json(f.model_path);
+    j["can_termination"] = true; f.model(j);
+    fake::fail_next("termination", nxErrInvalidPropertySize);
+    CHECK(f.initialize() == XNET_CO_XNET_ERROR);
+    CHECK(diagnostic(f.device).find("set CAN termination") != std::string::npos);
+    CHECK(fake::sessions() == 0);
 }
 
 void startup_bitrates() {
@@ -550,6 +592,46 @@ void single_od_access() {
     CHECK(xnet_canopen_read_od(f.device, 0x2000, 0, bytes, 2, &size) == 0 && bytes[0] == 0x34);
     CHECK(xnet_canopen_uninitialize(f.device) == 0);
     CHECK(xnet_canopen_write_od(f.device, 0x2000, 0, value, 2) == XNET_CO_INVALID_STATE);
+}
+
+void device_name_sdo() {
+    for (const std::string name : {"Xnet", "Hello-From-Xnet-Integration"}) {
+        Fixture f;
+        auto j = xco::read_json(XNET_CO_EXAMPLE_MODEL);
+        j["device_name"] = name;
+        f.model(j);
+        CHECK(f.initialize() == 0); f.start();
+        CHECK(f.status().nmt_state == CO_NMT_PRE_OPERATIONAL);
+        auto answer = exchange(0x60a, {0x40, 8, 0x10, 0, 0, 0, 0, 0}, 0x58a);
+        std::string received;
+        if (name.size() <= 4) {
+            CHECK(answer.Payload[0] == 0x43);
+            received.assign(reinterpret_cast<const char*>(answer.Payload + 4), 4);
+        } else {
+            CHECK(answer.Payload[0] == 0x41);
+            uint32_t length = 0;
+            std::memcpy(&length, answer.Payload + 4, sizeof(length));
+            CHECK(length == name.size());
+            uint8_t toggle = 0;
+            do {
+                answer = exchange(0x60a, {static_cast<uint8_t>(0x60 | toggle), 0, 0, 0, 0, 0, 0, 0}, 0x58a);
+                CHECK((answer.Payload[0] & 0xf0) == toggle);
+                const size_t count = 7 - ((answer.Payload[0] >> 1) & 7);
+                received.append(reinterpret_cast<const char*>(answer.Payload + 1), count);
+                toggle ^= 0x10;
+            } while ((answer.Payload[0] & 1) == 0 && received.size() < name.size());
+            CHECK((answer.Payload[0] & 1) != 0);
+        }
+        CHECK(received == name);
+        answer = sdo_download(0x1008, 0, 0, 1);
+        CHECK(answer.Payload[0] == 0x80);
+        uint32_t abort = 0;
+        std::memcpy(&abort, answer.Payload + 4, sizeof(abort));
+        CHECK(abort == CO_SDO_AB_READONLY);
+        const std::vector<uint8_t> value(name.size() + 1, 0);
+        CHECK(xnet_canopen_write_od(f.device, 0x1008, 0, value.data(),
+            static_cast<uint32_t>(value.size())) == XNET_CO_ACCESS_ERROR);
+    }
 }
 
 void protocol_basics() {
@@ -1525,11 +1607,13 @@ int main(int argc, char** argv) {
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"model validation", model_validation}, {"NODE_ID offsets", node_id_offsets},
         {"adapter session configuration", adapter_session_configuration},
+        {"CAN termination configuration", can_termination_configuration},
         {"startup bitrates", startup_bitrates}, {"scalar limits", scalar_limits},
         {"batches and lifecycle", batches_and_lifecycle}, {"partial writes and strings", partial_and_strings},
         {"single OD access", single_od_access},
         {"packed batch buffers", packed_batches}, {"batch argument validation and limits", batch_validation},
         {"SDO PDO EMCY NMT", protocol_basics},
+        {"device name SDO", device_name_sdo},
         {"eight PDO validation", eight_pdo_validation}, {"eight PDO traffic and lifecycle", eight_pdo_traffic},
         {"inactive PDO slots", inactive_pdo_slots}, {"eighth synchronous PDO", eighth_synchronous_pdo},
         {"LSS assignment and resets", lss_assignment_and_resets},

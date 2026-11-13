@@ -195,13 +195,18 @@ static Json scalar(const char* type, const Json& value, const char* access = "ro
  */
 void Model::load(const Json& root) {
     check_user_inputs(root);
-    keys(root, {"schema_version", "node_id", "bitrate_kbps", "identity", "heartbeat_ms", "worker_period_us",
-                "device_type", "objects", "rpdos", "tpdos", "node_guarding", "sync", "emcy"}, "model");
+    keys(root, {"schema_version", "node_id", "bitrate_kbps", "can_termination", "identity", "heartbeat_ms", "worker_period_us",
+                "device_type", "device_name", "objects", "rpdos", "tpdos", "node_guarding", "sync", "emcy"}, "model");
     require(unsigned_number(root.at("schema_version"), 1, "schema_version") == 1, XNET_CO_MODEL_ERROR, "unsupported schema_version");
     startup_node = static_cast<uint8_t>(unsigned_number(root.at("node_id"), 255, "node_id"));
     require((startup_node >= 1 && startup_node <= 127) || startup_node == 255, XNET_CO_MODEL_ERROR, "invalid node_id");
     startup_bitrate = static_cast<uint16_t>(unsigned_number(root.at("bitrate_kbps"), 1000, "bitrate_kbps"));
     require(valid_bitrate(startup_bitrate), XNET_CO_MODEL_ERROR, "bitrate_kbps must be 1..1000");
+    can_termination.reset();
+    if (root.contains("can_termination")) {
+        require(root.at("can_termination").is_boolean(), XNET_CO_MODEL_ERROR, "can_termination must be a boolean");
+        can_termination = root.at("can_termination").get<bool>();
+    }
     worker_period_us = static_cast<uint32_t>(unsigned_number(root.value("worker_period_us", Json(1000)), 100000, "worker_period_us"));
     require(worker_period_us >= 100, XNET_CO_MODEL_ERROR, "worker_period_us must be 100..100000");
     const auto& id = root.at("identity");
@@ -243,6 +248,14 @@ void Model::load(const Json& root) {
     var(0x1005, scalar("UNSIGNED32", sync_id, "rw")).values[0].is_node_relative = sync_relative;
     var(0x1006, scalar("UNSIGNED32", sync.value("period_us", Json(0)), "rw"));
     var(0x1007, scalar("UNSIGNED32", sync.value("window_us", Json(0)), "rw"));
+    if (root.contains("device_name")) {
+        require(root.at("device_name").is_string(), XNET_CO_MODEL_ERROR, "device_name must be a string");
+        const auto& name = root.at("device_name").get_ref<const std::string&>();
+        require(name.size() < 4096, XNET_CO_MODEL_ERROR, "device_name must be at most 4095 bytes");
+        auto value = scalar("VISIBLE_STRING", name);
+        value["size"] = name.size() + 1;
+        var(0x1008, std::move(value));
+    }
     const auto guarding = root.value("node_guarding", Json::object());
     keys(guarding, {"guard_time_ms", "life_time_factor"}, "node_guarding");
     const auto guard_ms = unsigned_number(guarding.value("guard_time_ms", Json(1000)), UINT16_MAX, "guard time");
